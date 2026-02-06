@@ -1,0 +1,20 @@
+[metadata]
+tmdb_api_key = ""  # or set RIPPER_TMDB_API_KEY env var
+auto_lookup = true
+fuzzy_threshold = 75
+
+[paths]
+staging_dir = "/mnt/media/Rips-Staging"
+movies_dir = "/mnt/media/Movies"
+tv_dir = "/mnt/media/TV"
+
+[device]
+path = "/dev/sr0"
+auto_eject = true
+
+[ripping]
+min_main_length = 3600    # 1 hour - classify as main feature
+min_extra_length = 30     # Skip titles < 30s (menus)
+
+[ui]
+theme = "dark"
