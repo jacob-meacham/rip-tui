@@ -34,11 +34,10 @@ def main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
-    from ripper.tui.app import RipperApp
+    from ripper.tui.app import run_interactive
 
     settings = _get_settings()
-    rip_app = RipperApp(settings)
-    rip_app.run()
+    run_interactive(settings)
 
 
 @app.command()
