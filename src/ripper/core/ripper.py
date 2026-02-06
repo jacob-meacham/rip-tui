@@ -27,6 +27,7 @@ class RipProgress:
     current_bytes: int
     total_bytes: int
     eta_seconds: int | None = None
+    bytes_per_second: float | None = None
 
 
 ProgressCallback = Callable[[RipProgress], None]
@@ -168,6 +169,12 @@ def _run_makemkv(
     title_id = current_title.id if current_title else 0
     title_name = current_title.name if current_title else "Unknown"
     start_time = time.monotonic()
+    last_current = 0
+    last_total = 0
+    last_percent = 0.0
+    last_rate: float | None = None
+    sample_time: float | None = None
+    sample_bytes: int | None = None
 
     try:
         for line in process.stdout:
@@ -178,6 +185,20 @@ def _run_makemkv(
             if title_match:
                 title_id = int(title_match.group(1))
                 title_name = title_match.group(2)
+                if on_progress:
+                    on_progress(
+                        RipProgress(
+                            title_id=title_id,
+                            title_name=title_name,
+                            percent=last_percent,
+                            current_bytes=last_current,
+                            total_bytes=last_total,
+                            eta_seconds=_calc_eta(
+                                last_percent, start_time
+                            ),
+                            bytes_per_second=last_rate,
+                        )
+                    )
 
             # Parse progress
             progress_match = PROGRESS_RE.match(line)
@@ -187,6 +208,20 @@ def _run_makemkv(
                 percent = (
                     (current / maximum * 100) if maximum > 0 else 0
                 )
+                now = time.monotonic()
+                rate: float | None = None
+                if sample_time is not None and sample_bytes is not None:
+                    elapsed = now - sample_time
+                    delta_bytes = current - sample_bytes
+                    if elapsed > 0 and delta_bytes >= 0:
+                        rate = delta_bytes / elapsed
+                sample_time = now
+                sample_bytes = current
+
+                last_current = current
+                last_total = maximum
+                last_percent = percent
+                last_rate = rate
 
                 eta = _calc_eta(percent, start_time)
                 on_progress(
@@ -197,6 +232,7 @@ def _run_makemkv(
                         current_bytes=current,
                         total_bytes=maximum,
                         eta_seconds=eta,
+                        bytes_per_second=rate,
                     )
                 )
 

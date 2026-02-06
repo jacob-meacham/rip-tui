@@ -16,3 +16,14 @@ def fmt_size(size_bytes: int) -> str:
     if size_bytes >= 1_048_576:
         return f"{size_bytes / 1_048_576:.0f} MB"
     return f"{size_bytes} bytes"
+
+
+def fmt_rate(bytes_per_second: float) -> str:
+    """Format transfer rate as human-readable string."""
+    if bytes_per_second >= 1_073_741_824:
+        return f"{bytes_per_second / 1_073_741_824:.1f} GB/s"
+    if bytes_per_second >= 1_048_576:
+        return f"{bytes_per_second / 1_048_576:.1f} MB/s"
+    if bytes_per_second >= 1024:
+        return f"{bytes_per_second / 1024:.0f} KB/s"
+    return f"{bytes_per_second:.0f} B/s"

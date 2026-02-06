@@ -34,7 +34,7 @@ from ripper.metadata.classifier import (
 )
 from ripper.metadata.matcher import clean_disc_name
 from ripper.utils.drive import eject_disc, wait_for_disc
-from ripper.utils.formatting import fmt_duration, fmt_size
+from ripper.utils.formatting import fmt_duration, fmt_rate, fmt_size
 
 logger = logging.getLogger(__name__)
 
@@ -469,24 +469,31 @@ def _print_title_table(disc_info: DiscInfo) -> None:
 _BAR_WIDTH = 30
 
 
-def _print_progress(progress: RipProgress) -> None:
-    """Print single-line progress update with carriage return."""
+def _format_progress_line(progress: RipProgress) -> str:
+    """Build the terminal progress line for a single update."""
     pct = progress.percent
     filled = int(_BAR_WIDTH * pct / 100)
     bar = "\u2588" * filled + "\u2591" * (_BAR_WIDTH - filled)
+    title = (progress.title_name or "Working")[:34]
 
-    parts = [f"\r  {bar}  {pct:5.1f}%"]
+    parts = [f"\r  {title:<34s} {bar}  {pct:5.1f}%"]
     if progress.total_bytes > 0:
         parts.append(
             f"  {fmt_size(progress.current_bytes)}"
             f" / {fmt_size(progress.total_bytes)}"
         )
     else:
-        parts.append("  Starting...")
+        parts.append("  Initializing...")
+    if progress.bytes_per_second and progress.bytes_per_second > 0:
+        parts.append(f"  {fmt_rate(progress.bytes_per_second)}")
     if progress.eta_seconds is not None:
         parts.append(f"  ETA: {fmt_duration(progress.eta_seconds)}")
+    return "".join(parts)
 
-    line = "".join(parts)
+
+def _print_progress(progress: RipProgress) -> None:
+    """Print single-line progress update with carriage return."""
+    line = _format_progress_line(progress)
     sys.stdout.write(f"{line:<100s}")
     sys.stdout.flush()
 
@@ -506,7 +513,7 @@ def _start_rip_with_status(
         on_progress(
             RipProgress(
                 title_id=0,
-                title_name="Starting",
+                title_name="Starting MakeMKV",
                 percent=0.0,
                 current_bytes=0,
                 total_bytes=0,

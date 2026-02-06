@@ -1,6 +1,6 @@
 """Tests for formatting utilities."""
 
-from ripper.utils.formatting import fmt_duration, fmt_size
+from ripper.utils.formatting import fmt_duration, fmt_rate, fmt_size
 
 
 class TestFmtDuration:
@@ -29,3 +29,17 @@ class TestFmtSize:
 
     def test_one_gb(self):
         assert fmt_size(1073741824) == "1.0 GB"
+
+
+class TestFmtRate:
+    def test_gb_per_second(self):
+        assert fmt_rate(2_147_483_648) == "2.0 GB/s"
+
+    def test_mb_per_second(self):
+        assert fmt_rate(32_768_000) == "31.2 MB/s"
+
+    def test_kb_per_second(self):
+        assert fmt_rate(32_768) == "32 KB/s"
+
+    def test_bytes_per_second(self):
+        assert fmt_rate(512) == "512 B/s"
