@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 from simple_term_menu import TerminalMenu
 
@@ -50,9 +51,8 @@ def _is_back_command(raw: str) -> bool:
 
 def run_interactive(settings: Settings) -> None:
     """Main interactive CLI flow."""
-    logging.basicConfig(
-        level=logging.INFO, format="%(levelname)s: %(message)s"
-    )
+    # Interactive mode should stay visually clean.
+    logging.getLogger().setLevel(logging.WARNING)
 
     console.print()
 
@@ -118,12 +118,16 @@ def _scan_disc(settings: Settings) -> DiscInfo | None:
     extra_count = len(disc_info.extra_titles)
     total = len(disc_info.titles)
 
-    console.print(f"  [dim]{disc_info.name}[/]")
-    console.print(f"  [bold]{cleaned}[/] — {media_label}")
-    console.print(
-        f"  [dim]{total} titles"
-        f" ({main_count} main, {extra_count} extras)[/]"
+    summary = Table.grid(padding=(0, 1))
+    summary.add_column(style="cyan", justify="right")
+    summary.add_column()
+    summary.add_row("Disc", f"[dim]{disc_info.name}[/]")
+    summary.add_row("Detected", f"[bold]{cleaned}[/] ({media_label})")
+    summary.add_row(
+        "Titles",
+        f"{total} total ({main_count} main, {extra_count} extras)",
     )
+    console.print(Panel.fit(summary, border_style="cyan"))
     console.print()
 
     return disc_info
@@ -217,7 +221,7 @@ def _show_menu() -> int | None:
 
     menu = _build_terminal_menu(
         _MENU_ITEMS,
-        title="  Use arrow keys, then Enter. Esc to quit.",
+        title="  Enter to select. Esc to quit.",
         show_menu_entry_index=False,
         cycle_cursor=True,
         menu_cursor_style=("fg_cyan", "bold"),
