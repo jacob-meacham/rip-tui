@@ -60,3 +60,19 @@ def test_format_progress_line_shows_size_progress():
     assert "1 MB / 10.0 GB" in line
     assert "31.2 MB/s" in line
     assert "ETA: 0h 02m 00s" in line
+
+
+def test_format_progress_line_shows_working_when_progress_title_updates():
+    progress = RipProgress(
+        title_id=0,
+        title_name="Saving to MKV file",
+        percent=0.0,
+        current_bytes=0,
+        total_bytes=0,
+        eta_seconds=None,
+    )
+
+    line = app._format_progress_line(progress)
+
+    assert "Saving to MKV file" in line
+    assert "Working..." in line

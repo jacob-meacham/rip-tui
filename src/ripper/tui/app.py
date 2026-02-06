@@ -482,8 +482,13 @@ def _format_progress_line(progress: RipProgress) -> str:
             f"  {fmt_size(progress.current_bytes)}"
             f" / {fmt_size(progress.total_bytes)}"
         )
+    elif progress.current_bytes > 0:
+        parts.append(f"  {fmt_size(progress.current_bytes)}")
     else:
-        parts.append("  Initializing...")
+        if progress.title_name and progress.title_name != "Starting MakeMKV":
+            parts.append("  Working...")
+        else:
+            parts.append("  Initializing...")
     if progress.bytes_per_second and progress.bytes_per_second > 0:
         parts.append(f"  {fmt_rate(progress.bytes_per_second)}")
     if progress.eta_seconds is not None:

@@ -36,6 +36,8 @@ ProgressCallback = Callable[[RipProgress], None]
 PROGRESS_RE = re.compile(r"^PRGV:(\d+),(\d+),(\d+)")
 # Current title being processed: PRGC:id,code,"name"
 CURRENT_TITLE_RE = re.compile(r'^PRGC:(\d+),\d+,"(.*)"')
+# Human-readable progress title: PRGT:cur,total,"message"
+PROGRESS_TITLE_RE = re.compile(r'^PRGT:\d+,\d+,"(.*)"')
 
 
 class RipCancelledError(Exception):
@@ -180,6 +182,25 @@ def _run_makemkv(
         for line in process.stdout:
             line = line.strip()
 
+            # Update current status/title from PRGT lines
+            progress_title_match = PROGRESS_TITLE_RE.match(line)
+            if progress_title_match:
+                title_name = progress_title_match.group(1) or title_name
+                if on_progress:
+                    on_progress(
+                        RipProgress(
+                            title_id=title_id,
+                            title_name=title_name,
+                            percent=last_percent,
+                            current_bytes=last_current,
+                            total_bytes=last_total,
+                            eta_seconds=_calc_eta(
+                                last_percent, start_time
+                            ),
+                            bytes_per_second=last_rate,
+                        )
+                    )
+
             # Update current title from PRGC lines
             title_match = CURRENT_TITLE_RE.match(line)
             if title_match:
@@ -203,8 +224,9 @@ def _run_makemkv(
             # Parse progress
             progress_match = PROGRESS_RE.match(line)
             if progress_match and on_progress:
-                current = int(progress_match.group(1))
-                maximum = int(progress_match.group(3))
+                current, maximum = _parse_progress_values(
+                    progress_match
+                )
                 percent = (
                     (current / maximum * 100) if maximum > 0 else 0
                 )
@@ -259,3 +281,20 @@ def _calc_eta(percent: float, start_time: float) -> int | None:
     total_estimated = elapsed / (percent / 100)
     remaining = total_estimated - elapsed
     return max(0, int(remaining))
+
+
+def _parse_progress_values(match: re.Match[str]) -> tuple[int, int]:
+    """Return (current, maximum) from a PRGV match.
+
+    MakeMKV variants differ in which field carries max/total progress.
+    Prefer a positive denominator and fall back to zero when unavailable.
+    """
+    first = int(match.group(1))
+    second = int(match.group(2))
+    third = int(match.group(3))
+
+    if third > 0:
+        return first, third
+    if second > 0:
+        return first, second
+    return first, 0
