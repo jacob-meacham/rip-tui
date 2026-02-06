@@ -1,9 +1,11 @@
 """Inline interactive CLI for ripping discs."""
 
 import asyncio
+import inspect
 import logging
 import sys
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 from rich.console import Console
@@ -195,12 +197,25 @@ _MENU_ITEMS = [
 ]
 
 
+def _build_terminal_menu(
+    entries: Sequence[str], **kwargs
+) -> TerminalMenu:
+    """Build a TerminalMenu while tolerating older library versions."""
+    supported = inspect.signature(TerminalMenu.__init__).parameters
+    compatible_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key in supported
+    }
+    return TerminalMenu(entries, **compatible_kwargs)
+
+
 def _show_menu() -> int | None:
     """Show scrollable action menu. Returns index or None to quit."""
     console.print("  [bold]What do you want to rip?[/]")
     console.print()
 
-    menu = TerminalMenu(
+    menu = _build_terminal_menu(
         _MENU_ITEMS,
         title="  Use arrow keys, then Enter. Esc to quit.",
         show_menu_entry_index=False,
@@ -315,7 +330,7 @@ def _select_titles(disc_info: DiscInfo) -> set[int] | None:
         if t.is_main_feature
     ]
 
-    menu = TerminalMenu(
+    menu = _build_terminal_menu(
         entries,
         title=(
             "  Space to toggle, Enter to confirm, Esc to go back."
