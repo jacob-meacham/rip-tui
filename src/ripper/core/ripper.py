@@ -1,6 +1,7 @@
 """Ripping engine with progress tracking and cancellation."""
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -151,23 +152,29 @@ def _run_makemkv(
     on_progress: ProgressCallback | None,
     current_title: Title | None = None,
 ) -> None:
-    """Execute makemkvcon and parse progress output."""
+    """Execute makemkvcon and parse progress output.
+
+    Uses a pseudo-TTY for stdout so makemkvcon line-buffers its
+    progress output instead of block-buffering to a pipe.
+    """
     global _active_process
 
     if not shutil.which("makemkvcon"):
         raise MakeMKVNotFoundError()
 
+    # Create a PTY so makemkvcon sees a terminal and line-buffers output
+    master_fd, slave_fd = os.openpty()
+
     process = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
     )
+    os.close(slave_fd)  # Parent doesn't need the slave end
+
     with _process_lock:
         _active_process = process
-
-    assert process.stdout is not None
 
     title_id = current_title.id if current_title else 0
     title_name = current_title.name if current_title else "Unknown"
@@ -179,9 +186,16 @@ def _run_makemkv(
     sample_time: float | None = None
     sample_bytes: int | None = None
 
+    # Wrap the master fd in a buffered text reader for readline()
+    master_file = open(master_fd, closefd=True)  # noqa: SIM115
+
     try:
         while True:
-            line = process.stdout.readline()
+            try:
+                line = master_file.readline()
+            except OSError:
+                # PTY returns EIO when the slave side closes
+                break
             if not line:
                 break
             line = line.strip()
@@ -189,7 +203,9 @@ def _run_makemkv(
             # Update current status/title from PRGT lines
             progress_title_match = PROGRESS_TITLE_RE.match(line)
             if progress_title_match:
-                title_name = progress_title_match.group(1) or title_name
+                title_name = (
+                    progress_title_match.group(1) or title_name
+                )
                 if on_progress:
                     on_progress(
                         RipProgress(
@@ -271,6 +287,7 @@ def _run_makemkv(
                 f"makemkvcon exited with code {return_code}"
             )
     finally:
+        master_file.close()
         with _process_lock:
             _active_process = None
 

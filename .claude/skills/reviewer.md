@@ -1,1 +1,0 @@
-/home/jacob/code/agent-instructions/coding/skills/reviewer.md
