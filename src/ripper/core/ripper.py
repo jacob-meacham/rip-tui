@@ -162,6 +162,7 @@ def _run_makemkv(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
     )
     with _process_lock:
         _active_process = process
@@ -179,7 +180,10 @@ def _run_makemkv(
     sample_bytes: int | None = None
 
     try:
-        for line in process.stdout:
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
             line = line.strip()
 
             # Update current status/title from PRGT lines
