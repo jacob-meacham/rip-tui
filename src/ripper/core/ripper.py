@@ -95,10 +95,11 @@ def rip_all_titles(
     """Rip all titles from disc to output directory."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    source = f"dev:{settings.device}"
     cmd = [
         "makemkvcon",
         "mkv",
-        "disc:0",
+        source,
         "all",
         str(output_dir),
         f"--minlength={settings.min_extra_length}",
@@ -120,10 +121,11 @@ def _rip_single_title(
     on_progress: ProgressCallback | None,
 ) -> Path | None:
     """Rip a single title from disc."""
+    source = f"dev:{settings.device}"
     cmd = [
         "makemkvcon",
         "mkv",
-        "disc:0",
+        source,
         str(title.id),
         str(output_dir),
         "--progress=-same",

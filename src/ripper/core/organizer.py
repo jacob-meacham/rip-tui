@@ -197,4 +197,4 @@ def _remove_if_empty(path: Path) -> None:
         if path.is_dir() and not any(path.iterdir()):
             path.rmdir()
     except OSError:
-        pass
+        logger.warning("Could not remove directory %s", path, exc_info=True)

@@ -30,7 +30,7 @@ def clean_disc_name(disc_name: str) -> str:
     """
     name = disc_name.upper()
     for pattern in DISC_NOISE_PATTERNS:
-        name = re.sub(pattern, "", name, flags=re.IGNORECASE)
+        name = re.sub(pattern, "", name)
 
     # Replace underscores and multiple spaces
     name = name.replace("_", " ")

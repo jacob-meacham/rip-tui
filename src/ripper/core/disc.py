@@ -1,8 +1,9 @@
 """Data structures for disc info, titles, and rip sessions."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
-from pathlib import Path
+
+from ripper.utils.formatting import fmt_duration, fmt_size
 
 
 class MediaType(Enum):
@@ -40,19 +41,12 @@ class Title:
     @property
     def duration_display(self) -> str:
         """Format duration as 'Xh XXm XXs'."""
-        h = self.duration_seconds // 3600
-        m = (self.duration_seconds % 3600) // 60
-        s = self.duration_seconds % 60
-        return f"{h}h {m:02d}m {s:02d}s"
+        return fmt_duration(self.duration_seconds)
 
     @property
     def size_display(self) -> str:
         """Format size as human-readable string."""
-        if self.size_bytes >= 1_073_741_824:
-            return f"{self.size_bytes / 1_073_741_824:.1f} GB"
-        elif self.size_bytes >= 1_048_576:
-            return f"{self.size_bytes / 1_048_576:.0f} MB"
-        return f"{self.size_bytes} bytes"
+        return fmt_size(self.size_bytes)
 
 
 @dataclass
@@ -74,14 +68,3 @@ class DiscInfo:
     @property
     def extra_titles(self) -> list[Title]:
         return [t for t in self.titles if not t.is_main_feature]
-
-
-@dataclass
-class RipSession:
-    """Tracks multi-disc rip state for resume support."""
-
-    session_id: str
-    movie_name: str
-    total_discs: int
-    completed_discs: list[int] = field(default_factory=list)
-    ripped_files: dict[int, list[Path]] = field(default_factory=dict)

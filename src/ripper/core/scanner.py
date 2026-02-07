@@ -30,8 +30,12 @@ def _parse_duration(duration_str: str) -> int:
     return 0
 
 
-def _parse_size(size_str: str) -> int:
-    """Parse size string into bytes, stripping non-numeric chars."""
+def _parse_raw_byte_count(size_str: str) -> int:
+    """Parse a raw byte count from makemkvcon output.
+
+    Expects a numeric string that may contain whitespace or separators
+    (e.g. "34474836992"). Does NOT handle formatted sizes like "1.5 GB".
+    """
     cleaned = "".join(c for c in size_str if c.isdigit())
     return int(cleaned) if cleaned else 0
 
@@ -48,9 +52,11 @@ def scan_disc(settings: Settings) -> DiscInfo:
 
     logger.info("Scanning disc at %s...", settings.device)
 
+    source = f"dev:{settings.device}"
+
     try:
         result = subprocess.run(
-            ["makemkvcon", "-r", "info", "disc:0"],
+            ["makemkvcon", "-r", "info", source],
             capture_output=True,
             text=True,
             timeout=300,
@@ -121,7 +127,7 @@ def _parse_makemkv_output(raw: str, settings: Settings) -> DiscInfo:
             id=tid,
             name=data.get("name", f"Title {tid}"),
             duration_seconds=duration,
-            size_bytes=_parse_size(data.get("size", "0")),
+            size_bytes=_parse_raw_byte_count(data.get("size", "0")),
             chapter_count=int(data.get("chapters", "0")),
             is_main_feature=duration >= settings.min_main_length,
         )

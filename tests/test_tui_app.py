@@ -2,6 +2,7 @@
 
 from ripper.core.ripper import RipProgress
 from ripper.tui import app
+from ripper.tui.display import format_progress_line
 
 
 def test_build_terminal_menu_ignores_unsupported_kwargs(
@@ -36,7 +37,7 @@ def test_format_progress_line_shows_title_and_init_status():
         eta_seconds=None,
     )
 
-    line = app._format_progress_line(progress)
+    line = format_progress_line(progress)
 
     assert "Starting MakeMKV" in line
     assert "Initializing..." in line
@@ -53,7 +54,7 @@ def test_format_progress_line_shows_size_progress():
         bytes_per_second=32_768_000,
     )
 
-    line = app._format_progress_line(progress)
+    line = format_progress_line(progress)
 
     assert "Main Feature" in line
     assert "42.5%" in line
@@ -72,7 +73,7 @@ def test_format_progress_line_shows_working_when_progress_title_updates():
         eta_seconds=None,
     )
 
-    line = app._format_progress_line(progress)
+    line = format_progress_line(progress)
 
     assert "Saving to MKV file" in line
     assert "Working..." in line

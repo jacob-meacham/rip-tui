@@ -1,7 +1,11 @@
 """Tests for disc scanner output parsing."""
 
 from ripper.config.settings import Settings
-from ripper.core.scanner import _parse_duration, _parse_makemkv_output, _parse_size
+from ripper.core.scanner import (
+    _parse_duration,
+    _parse_makemkv_output,
+    _parse_raw_byte_count,
+)
 
 
 class TestParseDuration:
@@ -18,18 +22,18 @@ class TestParseDuration:
         assert _parse_duration("0:00:05") == 5
 
 
-class TestParseSize:
+class TestParseRawByteCount:
     def test_numeric_string(self):
-        assert _parse_size("1073741824") == 1073741824
+        assert _parse_raw_byte_count("1073741824") == 1073741824
 
     def test_with_units(self):
-        assert _parse_size("1234 bytes") == 1234
+        assert _parse_raw_byte_count("1234 bytes") == 1234
 
     def test_empty(self):
-        assert _parse_size("") == 0
+        assert _parse_raw_byte_count("") == 0
 
     def test_non_numeric(self):
-        assert _parse_size("no numbers") == 0
+        assert _parse_raw_byte_count("no numbers") == 0
 
 
 class TestParseMakemkvOutput:

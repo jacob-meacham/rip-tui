@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from ripper.config.settings import Settings
+from ripper.core.ripper import RipCancelledError
 
 app = typer.Typer(
     name="rip",
@@ -14,6 +15,11 @@ app = typer.Typer(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_progress(p) -> None:
+    """Print single-line progress update for CLI commands."""
+    typer.echo(f"\r  {p.title_name}: {p.percent:.1f}%", nl=False)
 
 
 def _get_settings() -> Settings:
@@ -56,33 +62,37 @@ def movie(
     from ripper.core.scanner import scan_disc
     from ripper.utils.drive import eject_disc
 
-    def _log_progress(p):
-        typer.echo(f"\r  {p.title_name}: {p.percent:.1f}%", nl=False)
+    try:
+        typer.echo(f"Ripping: {name}")
 
-    typer.echo(f"Ripping: {name}")
+        if no_extras:
+            from ripper.core.ripper import rip_titles
 
-    if no_extras:
-        disc = scan_disc(settings)
-        from ripper.core.ripper import rip_titles
+            disc = scan_disc(settings)
+            main_titles = [t for t in disc.titles if t.is_main_feature]
+            if not main_titles:
+                main_titles = sorted(
+                    disc.titles,
+                    key=lambda t: t.duration_seconds,
+                    reverse=True,
+                )[:1]
+            rip_titles(main_titles, staging, settings, on_progress=_log_progress)
+        else:
+            rip_all_titles(staging, settings, on_progress=_log_progress)
 
-        main_titles = [t for t in disc.titles if t.is_main_feature]
-        if not main_titles:
-            # Fallback: use longest title
-            main_titles = sorted(
-                disc.titles,
-                key=lambda t: t.duration_seconds,
-                reverse=True,
-            )[:1]
-        rip_titles(main_titles, staging, settings, on_progress=_log_progress)
-    else:
-        rip_all_titles(staging, settings, on_progress=_log_progress)
+        typer.echo("")
+        organize_movie(staging, name, settings)
 
-    typer.echo("")
-    organize_movie(staging, name, settings)
-
-    if settings.auto_eject:
-        eject_disc(settings.device)
-    typer.echo(f"Done: {settings.movies_dir / name}")
+        if settings.auto_eject:
+            eject_disc(settings.device)
+        typer.echo(f"Done: {settings.movies_dir / name}")
+    except RipCancelledError:
+        typer.echo("\nCancelled by user.", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        logger.error("Rip failed: %s", e, exc_info=True)
+        typer.echo(f"\nError: {e}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -100,32 +110,39 @@ def multi(
     from ripper.core.ripper import rip_all_titles
     from ripper.utils.drive import eject_disc, wait_for_disc
 
-    def _log_progress(p):
-        typer.echo(f"\r  {p.title_name}: {p.percent:.1f}%", nl=False)
+    try:
+        disc_dirs: list[Path] = []
 
-    disc_dirs: list[Path] = []
+        for d in range(1, discs + 1):
+            if d > 1:
+                eject_disc(settings.device)
+                typer.echo(f"\nInsert disc {d} and press Enter...")
+                input()
+                typer.echo("Waiting for disc...")
+                if not wait_for_disc(settings.device):
+                    typer.echo(f"Timed out waiting for disc {d}", err=True)
+                    raise typer.Exit(1)
 
-    for d in range(1, discs + 1):
-        if d > 1:
+            disc_staging = settings.staging_dir / f"{name}-disc{d}"
+            typer.echo(f"Ripping disc {d}/{discs}...")
+            rip_all_titles(disc_staging, settings, on_progress=_log_progress)
+            disc_dirs.append(disc_staging)
+
+        typer.echo("")
+        organize_multi_disc(disc_dirs, name, settings, merge=not no_merge)
+
+        if settings.auto_eject:
             eject_disc(settings.device)
-            typer.echo(f"\nInsert disc {d} and press Enter...")
-            input()
-            typer.echo("Waiting for disc...")
-            if not wait_for_disc(settings.device):
-                typer.echo(f"Timed out waiting for disc {d}", err=True)
-                raise typer.Exit(1)
-
-        disc_staging = settings.staging_dir / f"{name}-disc{d}"
-        typer.echo(f"Ripping disc {d}/{discs}...")
-        rip_all_titles(disc_staging, settings, on_progress=_log_progress)
-        disc_dirs.append(disc_staging)
-
-    typer.echo("")
-    organize_multi_disc(disc_dirs, name, settings, merge=not no_merge)
-
-    if settings.auto_eject:
-        eject_disc(settings.device)
-    typer.echo(f"Done: {settings.movies_dir / name}")
+        typer.echo(f"Done: {settings.movies_dir / name}")
+    except RipCancelledError:
+        typer.echo("\nCancelled by user.", err=True)
+        raise typer.Exit(1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        logger.error("Rip failed: %s", e, exc_info=True)
+        typer.echo(f"\nError: {e}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -141,21 +158,28 @@ def tv(
     from ripper.core.ripper import rip_all_titles
     from ripper.utils.drive import eject_disc
 
-    def _log_progress(p):
-        typer.echo(f"\r  {p.title_name}: {p.percent:.1f}%", nl=False)
+    try:
+        typer.echo(f"Ripping: {show} Season {season}")
+        rip_all_titles(staging, settings, on_progress=_log_progress)
+        typer.echo("")
 
-    typer.echo(f"Ripping: {show} Season {season}")
-    rip_all_titles(staging, settings, on_progress=_log_progress)
-    typer.echo("")
+        # Auto-map by size (largest first)
+        mkvs = sorted(
+            staging.glob("*.mkv"), key=lambda p: p.stat().st_size, reverse=True
+        )
+        episode_map = {mkv: i + 1 for i, mkv in enumerate(mkvs)}
 
-    # Auto-map by size (largest first)
-    mkvs = sorted(staging.glob("*.mkv"), key=lambda p: p.stat().st_size, reverse=True)
-    episode_map = {mkv: i + 1 for i, mkv in enumerate(mkvs)}
-
-    season_dir = organize_tv(staging, show, season, episode_map, settings)
-    if settings.auto_eject:
-        eject_disc(settings.device)
-    typer.echo(f"Done: {season_dir}")
+        season_dir = organize_tv(staging, show, season, episode_map, settings)
+        if settings.auto_eject:
+            eject_disc(settings.device)
+        typer.echo(f"Done: {season_dir}")
+    except RipCancelledError:
+        typer.echo("\nCancelled by user.", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        logger.error("Rip failed: %s", e, exc_info=True)
+        typer.echo(f"\nError: {e}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command()

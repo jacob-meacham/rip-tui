@@ -3,10 +3,8 @@
 import asyncio
 import inspect
 import logging
-import sys
 import threading
 from collections.abc import Sequence
-from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -14,27 +12,20 @@ from rich.table import Table
 from simple_term_menu import TerminalMenu
 
 from ripper.config.settings import Settings
-from ripper.core.disc import DiscInfo, ExtraType, MediaType
-from ripper.core.organizer import (
-    organize_movie,
-    organize_multi_disc,
-    organize_tv,
-)
-from ripper.core.ripper import (
-    RipCancelledError,
-    RipProgress,
-    rip_all_titles,
-    rip_titles,
-)
+from ripper.core.disc import DiscInfo, MediaType
+from ripper.core.ripper import RipCancelledError
 from ripper.core.scanner import scan_disc
-from ripper.metadata.classifier import (
-    classify_extra,
-    classify_titles,
-    detect_media_type,
-)
+from ripper.metadata.classifier import classify_titles, detect_media_type
 from ripper.metadata.matcher import clean_disc_name
-from ripper.utils.drive import eject_disc, wait_for_disc
-from ripper.utils.formatting import fmt_duration, fmt_rate, fmt_size
+from ripper.tui.display import print_title_table
+from ripper.tui.flows import (
+    rip_movie_full,
+    rip_movie_main,
+    rip_multi_disc,
+    rip_selected,
+    rip_tv,
+)
+from ripper.utils.formatting import fmt_duration, fmt_size
 
 logger = logging.getLogger(__name__)
 
@@ -177,16 +168,24 @@ def _start_tmdb_lookup(
     return thread
 
 
-def _await_tmdb(thread: threading.Thread | None) -> None:
-    """Wait for background TMDb lookup to finish."""
-    if thread is None or not thread.is_alive():
-        return
+def _await_tmdb(thread: threading.Thread | None) -> bool:
+    """Wait for background TMDb lookup to finish.
+
+    Returns True if the thread completed, False if it timed out
+    (meaning disc_info may not have TMDb data populated).
+    """
+    if thread is None:
+        return True
+    if not thread.is_alive():
+        return True
     console.print("  [dim]Fetching metadata...[/]")
     thread.join(timeout=10)
     if thread.is_alive():
         console.print(
             "  [dim]TMDb lookup timed out, continuing without it[/]"
         )
+        return False
+    return True
 
 
 # ── Menu ─────────────────────────────────────────────────────────────
@@ -421,11 +420,15 @@ def _confirm_rip(
     return answer in ("", "y", "yes")
 
 
-def _get_titles(disc_info, mode, selected_ids=None):
+def _get_titles(
+    disc_info: DiscInfo,
+    mode: str,
+    selected_ids: set[int] | None = None,
+) -> list:
     """Get the list of titles for a given mode."""
     if mode == "main":
         return disc_info.main_titles
-    if selected_ids:
+    if selected_ids is not None:
         return [t for t in disc_info.titles if t.id in selected_ids]
     return disc_info.titles
 
@@ -436,177 +439,8 @@ def _get_titles(disc_info, mode, selected_ids=None):
 def _show_disc_info(disc_info: DiscInfo) -> None:
     """Print a formatted title table."""
     console.print()
-    _print_title_table(disc_info)
+    print_title_table(disc_info)
     console.print()
-
-
-def _print_title_table(disc_info: DiscInfo) -> None:
-    """Print title table using Rich."""
-    table = Table(show_header=True, padding=(0, 1))
-    table.add_column("", width=1)
-    table.add_column("ID", justify="right", width=3)
-    table.add_column("Name", min_width=30)
-    table.add_column("Duration", justify="right")
-    table.add_column("Size", justify="right")
-    table.add_column("Ch", justify="right")
-
-    for t in disc_info.titles:
-        marker = "[bold]*[/]" if t.is_main_feature else ""
-        table.add_row(
-            marker,
-            str(t.id),
-            t.name[:45],
-            t.duration_display,
-            t.size_display,
-            str(t.chapter_count),
-        )
-
-    console.print(table)
-
-
-# ── Progress ─────────────────────────────────────────────────────────
-
-_BAR_WIDTH = 30
-
-
-def _format_progress_line(progress: RipProgress) -> str:
-    """Build the terminal progress line for a single update."""
-    pct = progress.percent
-    filled = int(_BAR_WIDTH * pct / 100)
-    bar = "\u2588" * filled + "\u2591" * (_BAR_WIDTH - filled)
-    title = (progress.title_name or "Working")[:34]
-
-    parts = [f"\r  {title:<34s} {bar}  {pct:5.1f}%"]
-    if progress.total_bytes > 0:
-        parts.append(
-            f"  {fmt_size(progress.current_bytes)}"
-            f" / {fmt_size(progress.total_bytes)}"
-        )
-    elif progress.current_bytes > 0:
-        parts.append(f"  {fmt_size(progress.current_bytes)}")
-    else:
-        if progress.title_name and progress.title_name != "Starting MakeMKV":
-            parts.append("  Working...")
-        else:
-            parts.append("  Initializing...")
-    if progress.bytes_per_second and progress.bytes_per_second > 0:
-        parts.append(f"  {fmt_rate(progress.bytes_per_second)}")
-    if progress.eta_seconds is not None:
-        parts.append(f"  ETA: {fmt_duration(progress.eta_seconds)}")
-    return "".join(parts)
-
-
-def _print_progress(progress: RipProgress) -> None:
-    """Print single-line progress update with carriage return."""
-    line = _format_progress_line(progress)
-    sys.stdout.write(f"{line:<100s}")
-    sys.stdout.flush()
-
-
-def _start_rip_with_status(
-    label: str,
-    rip_fn,
-    *args,
-    **kwargs,
-) -> None:
-    """Print a label and immediate progress line, then rip."""
-    console.print()
-    console.print(f"  [bold]{label}[/]")
-    console.print("  [dim]Starting MakeMKV...[/]")
-    on_progress = kwargs.get("on_progress")
-    if on_progress:
-        on_progress(
-            RipProgress(
-                title_id=0,
-                title_name="Starting MakeMKV",
-                percent=0.0,
-                current_bytes=0,
-                total_bytes=0,
-                eta_seconds=None,
-            )
-        )
-    rip_fn(*args, **kwargs)
-    # Newline after the \r progress line
-    console.print()
-
-
-# ── Extras Classification ────────────────────────────────────────────
-
-
-def _classify_extras(extras: list[Path]) -> dict[Path, ExtraType]:
-    """Interactive extras classification using a selection menu."""
-    classifications: dict[Path, ExtraType] = {}
-    extra_types = list(ExtraType)
-    type_names = [et.value for et in extra_types]
-
-    console.print()
-    console.print("  [bold]Classify extras for Emby:[/]")
-    console.print()
-
-    for i, path in enumerate(extras):
-        size = path.stat().st_size if path.exists() else 0
-        suggested = classify_extra(path.stem)
-        classifications[path] = suggested
-        console.print(
-            f"  [cyan]{i + 1:>2d}[/]  {path.name[:40]:<40s}  "
-            f"{fmt_size(size):>8s}  [dim][{suggested.value}][/]"
-        )
-
-    console.print()
-    console.print(
-        "  [dim]Change: '<number> <category>'"
-        " (e.g. '1 featurettes')[/]"
-    )
-    console.print(
-        "  [dim]Categories: extras, behind the scenes,"
-        " deleted scenes,[/]"
-    )
-    console.print(
-        "  [dim]  featurettes, interviews, scenes,"
-        " shorts, trailers[/]"
-    )
-    console.print("  [dim]Press Enter to accept all.[/]")
-
-    valid_types = {et.value: et for et in ExtraType}
-    extras_list = list(extras)
-
-    while True:
-        console.print()
-        try:
-            raw = input("  > ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        if not raw:
-            break
-
-        parts = raw.split(maxsplit=1)
-        if len(parts) != 2:
-            console.print("  [red]Format: <number> <category>[/]")
-            continue
-
-        try:
-            idx = int(parts[0])
-        except ValueError:
-            console.print("  [red]Invalid number[/]")
-            continue
-
-        if idx < 1 or idx > len(extras_list):
-            console.print(
-                f"  [red]Number must be 1-{len(extras_list)}[/]"
-            )
-            continue
-
-        category = parts[1].lower()
-        if category not in valid_types:
-            console.print(f"  [red]Unknown category: {category}[/]")
-            continue
-
-        path = extras_list[idx - 1]
-        classifications[path] = valid_types[category]
-        console.print(f"  [green]{idx} -> {category}[/]")
-
-    return classifications
 
 
 # ── Rip Flows ────────────────────────────────────────────────────────
@@ -635,11 +469,11 @@ def _flow_movie(
 
     try:
         if mode == "full":
-            _rip_movie_full(settings, disc_info, name)
+            rip_movie_full(settings, disc_info, name)
         elif mode == "main":
-            _rip_movie_main(settings, disc_info, name)
+            rip_movie_main(settings, disc_info, name)
         elif mode == "multi":
-            _rip_multi_disc(settings, disc_info, name, disc_count)
+            rip_multi_disc(settings, disc_info, name, disc_count)
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
@@ -658,7 +492,7 @@ def _flow_tv(settings: Settings, disc_info: DiscInfo) -> None:
         return
 
     try:
-        _rip_tv(settings, disc_info, show, season)
+        rip_tv(settings, disc_info, show, season)
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
@@ -682,299 +516,9 @@ def _flow_select(
         return
 
     try:
-        selected = [
-            t
-            for t in disc_info.titles
-            if t.id in selected_ids
-        ]
-        _start_rip_with_status(
-            f"Ripping to {settings.staging_dir / name}",
-            rip_titles,
-            selected,
-            settings.staging_dir / name,
-            settings,
-            on_progress=_print_progress,
-        )
-        console.print(
-            f"  [green bold]Done![/]"
-            f" Output: {settings.staging_dir / name}"
-        )
+        rip_selected(settings, disc_info, name, selected_ids)
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
         console.print(f"\n  [red]Error: {e}[/]")
         logger.error("Rip failed: %s", e, exc_info=True)
-
-
-# ── Rip Operations ───────────────────────────────────────────────────
-
-
-def _rip_movie_full(
-    settings: Settings, disc_info: DiscInfo, name: str
-) -> None:
-    """Rip movie with all extras."""
-    staging = settings.staging_dir / name
-
-    _start_rip_with_status(
-        f"Ripping: {name}",
-        rip_all_titles,
-        staging,
-        settings,
-        on_progress=_print_progress,
-    )
-
-    # Classify extras
-    mkvs = sorted(
-        staging.glob("*.mkv"),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
-    extras = mkvs[1:]
-    extras_map = _classify_extras(extras) if extras else None
-
-    console.print("  Organizing files...")
-    organize_movie(staging, name, settings, extras_map=extras_map)
-
-    if settings.auto_eject:
-        eject_disc(settings.device)
-
-    console.print(
-        f"  [green bold]Done![/]"
-        f" Output: {settings.movies_dir / name}"
-    )
-
-
-def _rip_movie_main(
-    settings: Settings, disc_info: DiscInfo, name: str
-) -> None:
-    """Rip main feature only."""
-    staging = settings.staging_dir / name
-    main_titles = disc_info.main_titles
-    if not main_titles:
-        console.print("  [red]No main feature detected[/]")
-        return
-
-    _start_rip_with_status(
-        f"Ripping: {name}",
-        rip_titles,
-        main_titles,
-        staging,
-        settings,
-        on_progress=_print_progress,
-    )
-
-    console.print("  Organizing files...")
-    organize_movie(staging, name, settings)
-
-    if settings.auto_eject:
-        eject_disc(settings.device)
-
-    console.print(
-        f"  [green bold]Done![/]"
-        f" Output: {settings.movies_dir / name}"
-    )
-
-
-def _rip_multi_disc(
-    settings: Settings,
-    disc_info: DiscInfo,
-    name: str,
-    disc_count: int,
-) -> None:
-    """Rip multi-disc movie."""
-    disc_dirs: list[Path] = []
-
-    for d in range(1, disc_count + 1):
-        if d > 1:
-            eject_disc(settings.device)
-            console.print()
-            try:
-                input(f"  Insert disc {d} and press Enter...")
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n  [yellow]Cancelled.[/]")
-                return
-            console.print("  [dim]Waiting for disc...[/]")
-            if not wait_for_disc(
-                settings.device, timeout_seconds=120
-            ):
-                console.print(
-                    f"  [red]Timed out waiting for disc {d}[/]"
-                )
-                return
-
-        disc_staging = settings.staging_dir / f"{name}-disc{d}"
-        _start_rip_with_status(
-            f"Ripping disc {d}/{disc_count}...",
-            rip_all_titles,
-            disc_staging,
-            settings,
-            on_progress=_print_progress,
-        )
-        disc_dirs.append(disc_staging)
-
-    console.print("  Organizing and merging files...")
-    organize_multi_disc(disc_dirs, name, settings)
-
-    if settings.auto_eject:
-        eject_disc(settings.device)
-
-    console.print(
-        f"  [green bold]Done![/]"
-        f" Output: {settings.movies_dir / name}"
-    )
-
-
-def _rip_tv(
-    settings: Settings,
-    disc_info: DiscInfo,
-    show: str,
-    season: int,
-) -> None:
-    """Rip TV episodes."""
-    staging = settings.staging_dir / f"{show}-S{season:02d}"
-
-    _start_rip_with_status(
-        f"Ripping: {show} Season {season}",
-        rip_all_titles,
-        staging,
-        settings,
-        on_progress=_print_progress,
-    )
-
-    console.print("  Organizing episodes...")
-    mkvs = sorted(
-        staging.glob("*.mkv"),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
-    episode_map = _match_tv_episodes(
-        settings, disc_info, show, season, mkvs
-    )
-
-    season_dir = organize_tv(
-        staging, show, season, episode_map, settings
-    )
-
-    if settings.auto_eject:
-        eject_disc(settings.device)
-
-    console.print(f"  [green bold]Done![/] Output: {season_dir}")
-
-
-def _match_tv_episodes(
-    settings: Settings,
-    disc_info: DiscInfo,
-    show: str,
-    season: int,
-    mkvs: list[Path],
-) -> dict[Path, int]:
-    """Match MKV files to episode numbers."""
-    if settings.tmdb_api_key:
-        try:
-            result = _try_tmdb_episode_match(
-                settings, disc_info, show, season, mkvs
-            )
-            if result:
-                return result
-        except Exception:
-            logger.warning(
-                "TMDb episode match failed,"
-                " using size-based mapping"
-            )
-
-    return {mkv: i + 1 for i, mkv in enumerate(mkvs)}
-
-
-def _try_tmdb_episode_match(
-    settings: Settings,
-    disc_info: DiscInfo,
-    show: str,
-    season: int,
-    mkvs: list[Path],
-) -> dict[Path, int] | None:
-    """Try to match episodes using TMDb runtimes."""
-    from ripper.metadata.matcher import (
-        match_episodes_by_duration,
-        match_title,
-    )
-    from ripper.metadata.tmdb import TMDbClient
-
-    async def _lookup():
-        client = TMDbClient(settings.tmdb_api_key)
-        try:
-            results = await client.search_tv(show)
-            match = match_title(
-                show,
-                results,
-                title_key="name",
-                threshold=settings.fuzzy_threshold,
-            )
-            if not match:
-                return None
-            tv_id = match.get("id")
-            if not tv_id:
-                return None
-            return await client.get_season_episodes(
-                tv_id, season
-            )
-        finally:
-            await client.close()
-
-    episodes = asyncio.run(_lookup())
-    if not episodes:
-        return None
-
-    title_durations = _get_mkv_durations(disc_info, mkvs)
-    episode_runtimes: list[tuple[int, int]] = [
-        (ep["episode_number"], ep.get("runtime", 0) * 60)
-        for ep in episodes
-        if ep.get("runtime")
-    ]
-
-    if not episode_runtimes:
-        return None
-
-    matches = match_episodes_by_duration(
-        title_durations, episode_runtimes
-    )
-    if not matches:
-        return None
-
-    episode_map: dict[Path, int] = {}
-    for idx, ep_num in matches.items():
-        if idx < len(mkvs):
-            episode_map[mkvs[idx]] = ep_num
-
-    # Fill unmatched with next available
-    used_eps = set(episode_map.values())
-    next_ep = 1
-    for mkv in mkvs:
-        if mkv not in episode_map:
-            while next_ep in used_eps:
-                next_ep += 1
-            episode_map[mkv] = next_ep
-            used_eps.add(next_ep)
-            next_ep += 1
-
-    return episode_map
-
-
-def _get_mkv_durations(
-    disc_info: DiscInfo, mkvs: list[Path]
-) -> list[tuple[int, int]]:
-    """Get durations for MKV files from disc_info."""
-    durations: list[tuple[int, int]] = []
-    for i, mkv in enumerate(mkvs):
-        dur = 0
-        stem = mkv.stem.lower()
-        for title in disc_info.titles:
-            patterns = [
-                f"t{title.id:02d}",
-                f"title{title.id:02d}",
-                f"title_{title.id}",
-            ]
-            if any(p in stem for p in patterns):
-                dur = title.duration_seconds
-                break
-        durations.append((i, dur))
-    return durations
