@@ -45,6 +45,16 @@ PROGRESS_RE = re.compile(r"^PRGV:(\d+),(\d+),(\d+)")
 CURRENT_TITLE_RE = re.compile(r'^PRGC:(\d+),\d+,"(.*)"')
 # Human-readable progress title: PRGT:cur,total,"message"
 PROGRESS_TITLE_RE = re.compile(r'^PRGT:\d+,\d+,"(.*)"')
+# Human-readable fallback from non-robot output:
+# Current progress - 8%  , Total progress - 7%
+HUMAN_PROGRESS_RE = re.compile(
+    r"^Current progress - (\d+)%\s*,\s*Total progress - (\d+)%$"
+)
+# Human-readable status text:
+# Current action: Saving to MKV file
+# Current operation: Saving all titles to MKV files
+HUMAN_ACTION_RE = re.compile(r"^Current action:\s*(.+)$")
+HUMAN_OPERATION_RE = re.compile(r"^Current operation:\s*(.+)$")
 
 
 class RipCancelledError(Exception):
@@ -350,6 +360,61 @@ def _run_makemkv(
                     debug_harness=debug_harness,
                 )
 
+            # Update current status from human-readable action lines
+            action_match = HUMAN_ACTION_RE.match(line)
+            if action_match:
+                matched_progress_line = True
+                title_name = action_match.group(1).strip() or title_name
+                if debug_harness:
+                    debug_harness.record(
+                        "line_parsed",
+                        kind="HUMAN_ACTION",
+                        title_name=title_name,
+                    )
+                progress = RipProgress(
+                    title_id=title_id,
+                    title_name=title_name,
+                    percent=last_percent,
+                    current_bytes=last_current,
+                    total_bytes=last_total,
+                    eta_seconds=_calc_eta(last_percent, start_time),
+                    bytes_per_second=last_rate,
+                )
+                _emit_progress_update(
+                    progress,
+                    source="HUMAN_ACTION",
+                    on_progress=on_progress,
+                    debug_harness=debug_harness,
+                )
+
+            operation_match = HUMAN_OPERATION_RE.match(line)
+            if operation_match:
+                matched_progress_line = True
+                title_name = (
+                    operation_match.group(1).strip() or title_name
+                )
+                if debug_harness:
+                    debug_harness.record(
+                        "line_parsed",
+                        kind="HUMAN_OPERATION",
+                        title_name=title_name,
+                    )
+                progress = RipProgress(
+                    title_id=title_id,
+                    title_name=title_name,
+                    percent=last_percent,
+                    current_bytes=last_current,
+                    total_bytes=last_total,
+                    eta_seconds=_calc_eta(last_percent, start_time),
+                    bytes_per_second=last_rate,
+                )
+                _emit_progress_update(
+                    progress,
+                    source="HUMAN_OPERATION",
+                    on_progress=on_progress,
+                    debug_harness=debug_harness,
+                )
+
             # Parse progress
             progress_match = PROGRESS_RE.match(line)
             if progress_match:
@@ -357,7 +422,7 @@ def _run_makemkv(
                 current, maximum = _parse_progress_values(
                     progress_match
                 )
-                percent = (
+                percent = _clamp_percent(
                     (current / maximum * 100) if maximum > 0 else 0
                 )
                 if debug_harness:
@@ -400,9 +465,53 @@ def _run_makemkv(
                     debug_harness=debug_harness,
                 )
 
+            # Parse human-readable progress fallback
+            human_progress_match = HUMAN_PROGRESS_RE.match(line)
+            if human_progress_match:
+                matched_progress_line = True
+                percent = _parse_human_progress_values(
+                    human_progress_match
+                )
+                if debug_harness:
+                    debug_harness.record(
+                        "line_parsed",
+                        kind="HUMAN_PROGRESS",
+                        current_percent=int(
+                            human_progress_match.group(1)
+                        ),
+                        total_percent=int(
+                            human_progress_match.group(2)
+                        ),
+                        percent=percent,
+                    )
+                last_current = 0
+                last_total = 0
+                last_percent = percent
+                last_rate = None
+                sample_time = None
+                sample_bytes = None
+                progress = RipProgress(
+                    title_id=title_id,
+                    title_name=title_name,
+                    percent=percent,
+                    current_bytes=0,
+                    total_bytes=0,
+                    eta_seconds=_calc_eta(percent, start_time),
+                    bytes_per_second=None,
+                )
+                _emit_progress_update(
+                    progress,
+                    source="HUMAN_PROGRESS",
+                    on_progress=on_progress,
+                    debug_harness=debug_harness,
+                )
+
             if (
                 debug_harness
-                and line.startswith("PR")
+                and (
+                    line.startswith("PR")
+                    or line.startswith("Current ")
+                )
                 and not matched_progress_line
             ):
                 debug_harness.record(
@@ -467,6 +576,22 @@ def _parse_progress_values(match: re.Match[str]) -> tuple[int, int]:
     if second > 0:
         return first, second
     return first, 0
+
+
+def _parse_human_progress_values(match: re.Match[str]) -> float:
+    """Return a normalized progress percent from human-readable output."""
+    current_percent = int(match.group(1))
+    total_percent = int(match.group(2))
+    percent = total_percent if total_percent > 0 else current_percent
+    return _clamp_percent(float(percent))
+
+
+def _clamp_percent(percent: float) -> float:
+    if percent < 0:
+        return 0.0
+    if percent > 100:
+        return 100.0
+    return percent
 
 
 def summarize_progress_trace(
