@@ -9,6 +9,7 @@ from rich.console import Console
 from ripper.config.settings import Settings
 from ripper.core.disc import DiscInfo
 from ripper.core.organizer import (
+    find_mkv_files,
     organize_movie,
     organize_multi_disc,
     organize_tv,
@@ -41,11 +42,7 @@ def rip_movie_full(
     )
 
     # Classify extras
-    mkvs = sorted(
-        staging.glob("*.mkv"),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
+    mkvs = find_mkv_files(staging)
     extras = mkvs[1:]
     extras_map = classify_extras_interactive(extras) if extras else None
 
@@ -159,11 +156,7 @@ def rip_tv(
     )
 
     console.print("  Organizing episodes...")
-    mkvs = sorted(
-        staging.glob("*.mkv"),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
+    mkvs = find_mkv_files(staging)
     episode_map = _match_tv_episodes(
         settings, disc_info, show, season, mkvs
     )

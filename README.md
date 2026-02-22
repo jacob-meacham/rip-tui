@@ -60,6 +60,9 @@ rip multi "Lawrence of Arabia (1962)" --discs 2
 # Rip a TV show disc
 rip tv "Seinfeld" 3
 
+# Re-organize any completed leftovers in Rips-Staging
+rip organize
+
 # Show disc title info without ripping
 rip info
 

@@ -1,14 +1,136 @@
 """File organization for Emby-compatible folder structures."""
 
 import logging
+import re
 import shutil
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ripper.config.settings import Settings
 from ripper.core.disc import ExtraType
+from ripper.metadata.classifier import classify_extra
 
 logger = logging.getLogger(__name__)
+
+_MULTI_DISC_DIR_RE = re.compile(
+    r"^(?P<name>.+)-disc(?P<disc>\d+)$",
+    re.IGNORECASE,
+)
+_TV_SEASON_DIR_RE = re.compile(
+    r"^(?P<show>.+)-s(?P<season>\d{1,2})$",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class ReorganizeStagingResult:
+    """Result summary for a staging reorganization pass."""
+
+    movies: list[Path] = field(default_factory=list)
+    tv: list[Path] = field(default_factory=list)
+    multi_disc: list[Path] = field(default_factory=list)
+    skipped: list[Path] = field(default_factory=list)
+    errors: list[tuple[Path, str]] = field(default_factory=list)
+
+    @property
+    def processed_count(self) -> int:
+        return len(self.movies) + len(self.tv) + len(self.multi_disc)
+
+
+def find_mkv_files(root: Path) -> list[Path]:
+    """Return MKV files under root (recursive, case-insensitive), largest first."""
+    if not root.exists():
+        return []
+
+    mkvs = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".mkv"
+    ]
+    return sorted(
+        mkvs,
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+
+
+def reorganize_staging(
+    settings: Settings,
+    staging_root: Path | None = None,
+) -> ReorganizeStagingResult:
+    """Re-organize existing rip folders in a staging directory.
+
+    Expected folder patterns under staging root:
+    - Movie: `<Movie Name (Year)>`
+    - TV season: `<Show Name>-S01`
+    - Multi-disc: `<Movie Name>-disc1`, `<Movie Name>-disc2`, ...
+    """
+    root = staging_root or settings.staging_dir
+    result = ReorganizeStagingResult()
+
+    if not root.exists() or not root.is_dir():
+        return result
+
+    multi_disc_groups: dict[str, list[tuple[int, Path]]] = {}
+    entries = sorted(
+        (entry for entry in root.iterdir() if entry.is_dir()),
+        key=lambda p: p.name.lower(),
+    )
+    for entry in entries:
+        mkvs = find_mkv_files(entry)
+        if not mkvs:
+            result.skipped.append(entry)
+            _remove_if_empty(entry)
+            continue
+
+        multi_match = _MULTI_DISC_DIR_RE.match(entry.name)
+        if multi_match:
+            movie_name = multi_match.group("name").strip()
+            disc_num = int(multi_match.group("disc"))
+            multi_disc_groups.setdefault(movie_name, []).append(
+                (disc_num, entry)
+            )
+            continue
+
+        tv_match = _TV_SEASON_DIR_RE.match(entry.name)
+        if tv_match:
+            show_name = tv_match.group("show").strip()
+            season_num = int(tv_match.group("season"))
+            episode_map = {mkv: i + 1 for i, mkv in enumerate(mkvs)}
+            try:
+                season_dir = organize_tv(
+                    entry,
+                    show_name,
+                    season_num,
+                    episode_map,
+                    settings,
+                )
+                result.tv.append(season_dir)
+            except Exception as exc:
+                result.errors.append((entry, str(exc)))
+            continue
+
+        try:
+            movie_dir = organize_movie(entry, entry.name, settings)
+            result.movies.append(movie_dir)
+        except Exception as exc:
+            result.errors.append((entry, str(exc)))
+
+    for movie_name, grouped in sorted(multi_disc_groups.items()):
+        disc_dirs = [
+            path for _, path in sorted(grouped, key=lambda item: item[0])
+        ]
+        try:
+            movie_dir = organize_multi_disc(disc_dirs, movie_name, settings)
+            result.multi_disc.append(movie_dir)
+        except Exception as exc:
+            error_text = str(exc)
+            for _, disc_dir in grouped:
+                result.errors.append((disc_dir, error_text))
+
+    _remove_if_empty(root)
+    return result
 
 
 def organize_movie(
@@ -32,11 +154,7 @@ def organize_movie(
     dest = settings.movies_dir / movie_name
     dest.mkdir(parents=True, exist_ok=True)
 
-    mkvs = sorted(
-        staging_dir.glob("*.mkv"),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
+    mkvs = find_mkv_files(staging_dir)
     if not mkvs:
         raise FileNotFoundError(f"No MKV files found in {staging_dir}")
 
@@ -52,7 +170,7 @@ def organize_movie(
         extras_map = {}
 
     for extra in extras:
-        extra_type = extras_map.get(extra, ExtraType.EXTRAS)
+        extra_type = extras_map.get(extra) or classify_extra(extra.stem)
         extra_dir = dest / extra_type.value
         extra_dir.mkdir(exist_ok=True)
         logger.info("  -> %s/%s", extra_type.value, extra.name)
@@ -121,11 +239,7 @@ def organize_multi_disc(
     all_extras: list[Path] = []
 
     for disc_dir in disc_dirs:
-        mkvs = sorted(
-            disc_dir.glob("*.mkv"),
-            key=lambda p: p.stat().st_size,
-            reverse=True,
-        )
+        mkvs = find_mkv_files(disc_dir)
         if not mkvs:
             logger.warning("No MKV files in %s, skipping", disc_dir)
             continue
@@ -151,7 +265,7 @@ def organize_multi_disc(
         extras_map = {}
 
     for extra in all_extras:
-        extra_type = extras_map.get(extra, ExtraType.EXTRAS)
+        extra_type = extras_map.get(extra) or classify_extra(extra.stem)
         extra_dir = dest / extra_type.value
         extra_dir.mkdir(exist_ok=True)
         shutil.move(str(extra), str(extra_dir / extra.name))
@@ -192,9 +306,21 @@ def _merge_segments(segments: list[Path], dest: Path, movie_name: str) -> None:
 
 
 def _remove_if_empty(path: Path) -> None:
-    """Remove directory if it's empty."""
+    """Remove path and any empty subdirectories beneath it."""
     try:
-        if path.is_dir() and not any(path.iterdir()):
+        if not path.is_dir():
+            return
+
+        # Remove nested empty directories first, then the root.
+        for subdir in sorted(
+            (p for p in path.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            if not any(subdir.iterdir()):
+                subdir.rmdir()
+
+        if not any(path.iterdir()):
             path.rmdir()
     except OSError:
         logger.warning("Could not remove directory %s", path, exc_info=True)

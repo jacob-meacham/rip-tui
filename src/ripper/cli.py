@@ -155,7 +155,7 @@ def tv(
     settings = _get_settings()
     staging = settings.staging_dir / f"{show}-S{season:02d}"
 
-    from ripper.core.organizer import organize_tv
+    from ripper.core.organizer import find_mkv_files, organize_tv
     from ripper.core.ripper import rip_all_titles
     from ripper.utils.drive import eject_disc
 
@@ -165,9 +165,7 @@ def tv(
         typer.echo("")
 
         # Auto-map by size (largest first)
-        mkvs = sorted(
-            staging.glob("*.mkv"), key=lambda p: p.stat().st_size, reverse=True
-        )
+        mkvs = find_mkv_files(staging)
         episode_map = {mkv: i + 1 for i, mkv in enumerate(mkvs)}
 
         season_dir = organize_tv(staging, show, season, episode_map, settings)
@@ -203,6 +201,46 @@ def info() -> None:
             f" {marker} {t.id:2d} {t.name:<40s} {t.duration_display:<12s} "
             f"{t.size_display:<10s} {t.chapter_count:4d}"
         )
+
+
+@app.command()
+def organize(
+    staging: Path | None = typer.Option(
+        None,
+        "--staging",
+        "-s",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="Staging root to process (defaults to configured staging_dir).",
+    ),
+) -> None:
+    """Re-organize existing rip folders from staging into libraries."""
+    settings = _get_settings()
+    root = staging or settings.staging_dir
+
+    from ripper.core.organizer import reorganize_staging
+
+    result = reorganize_staging(settings, staging_root=root)
+
+    typer.echo(f"Staging root: {root}")
+    typer.echo(
+        "Processed: "
+        f"movies={len(result.movies)}, "
+        f"tv={len(result.tv)}, "
+        f"multi-disc={len(result.multi_disc)}"
+    )
+    if result.skipped:
+        typer.echo(f"Skipped: {len(result.skipped)} directory(s)")
+    if result.errors:
+        typer.echo(f"Errors: {len(result.errors)}", err=True)
+        for source, error in result.errors:
+            typer.echo(f"  {source}: {error}", err=True)
+        raise typer.Exit(1)
+    if result.processed_count == 0:
+        typer.echo("Nothing to organize.")
+    else:
+        typer.echo("Organize pass complete.")
 
 
 @app.command("debug-progress")
