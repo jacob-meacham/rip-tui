@@ -120,6 +120,26 @@ uv run rip
 uv run pytest
 ```
 
+### Progress debug harness
+
+Capture a detailed JSONL trace of MakeMKV progress parsing:
+
+```sh
+RIPPER_PROGRESS_DEBUG=1 rip
+```
+
+Or write to a specific path:
+
+```sh
+RIPPER_PROGRESS_DEBUG=1 RIPPER_PROGRESS_DEBUG_FILE=/tmp/rip-progress.jsonl rip movie "Dune (2021)"
+```
+
+Summarize the trace after the run:
+
+```sh
+rip debug-progress /tmp/rip-progress.jsonl --tail 25 --show-raw
+```
+
 ### Lint and format
 
 ```sh

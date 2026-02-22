@@ -2,6 +2,7 @@
 
 import logging
 from pathlib import Path
+from typing import cast
 
 import typer
 
@@ -202,6 +203,114 @@ def info() -> None:
             f" {marker} {t.id:2d} {t.name:<40s} {t.duration_display:<12s} "
             f"{t.size_display:<10s} {t.chapter_count:4d}"
         )
+
+
+@app.command("debug-progress")
+def debug_progress(
+    trace: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        file_okay=True,
+        resolve_path=True,
+        help=(
+            "Path to a JSONL trace generated with "
+            "RIPPER_PROGRESS_DEBUG=1"
+        ),
+    ),
+    tail: int = typer.Option(
+        10,
+        "--tail",
+        min=1,
+        max=100,
+        help="Number of tail lines to include in diagnostics.",
+    ),
+    show_raw: bool = typer.Option(
+        False,
+        "--show-raw",
+        help="Show tail of raw makemkv lines as captured.",
+    ),
+) -> None:
+    """Summarize a progress debug trace."""
+    from ripper.core.ripper import summarize_progress_trace
+
+    summary = summarize_progress_trace(trace, tail_size=tail)
+    parsed_counts = cast(dict[str, int], summary["parsed_counts"])
+    emitted_counts = cast(dict[str, int], summary["emitted_counts"])
+    final_progress = cast(
+        dict[str, object] | None, summary["final_progress"]
+    )
+    unparsed_lines = cast(
+        list[str], summary["unparsed_progress_lines"]
+    )
+    raw_tail = cast(list[str], summary["raw_tail"])
+    process_exit_code = cast(
+        int | None, summary["process_exit_code"]
+    )
+
+    typer.echo(f"Trace: {trace}")
+    typer.echo(
+        "Events: "
+        f"{summary['total_events']} "
+        f"(malformed: {summary['malformed_lines']})"
+    )
+    typer.echo(f"Raw lines: {summary['raw_lines']}")
+    typer.echo(
+        "Parsed lines: "
+        + (
+            ", ".join(
+                f"{kind}={count}"
+                for kind, count in sorted(parsed_counts.items())
+            )
+            if parsed_counts
+            else "none"
+        )
+    )
+    typer.echo(
+        "Progress emits: "
+        + (
+            ", ".join(
+                f"{kind}={count}"
+                for kind, count in sorted(emitted_counts.items())
+            )
+            if emitted_counts
+            else "none"
+        )
+    )
+    typer.echo(
+        "Process exit code: "
+        + (
+            str(process_exit_code)
+            if process_exit_code is not None
+            else "unknown"
+        )
+    )
+
+    if final_progress:
+        title_name = str(final_progress.get("title_name", ""))
+        percent = float(final_progress.get("percent", 0.0))
+        current = int(final_progress.get("current_bytes", 0))
+        total = int(final_progress.get("total_bytes", 0))
+        typer.echo(
+            "Final progress: "
+            f"{percent:.1f}% "
+            f"({current}/{total} bytes) "
+            f"title='{title_name}'"
+        )
+    else:
+        typer.echo("Final progress: none emitted")
+
+    if unparsed_lines:
+        typer.echo("")
+        typer.echo(f"Unparsed PR* lines (tail {len(unparsed_lines)}):")
+        for line in unparsed_lines:
+            typer.echo(f"  {line}")
+
+    if show_raw and raw_tail:
+        typer.echo("")
+        typer.echo(f"Raw line tail ({len(raw_tail)}):")
+        for line in raw_tail:
+            typer.echo(f"  {line}")
 
 
 @app.command()
