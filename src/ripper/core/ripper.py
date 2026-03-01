@@ -318,6 +318,192 @@ def _rip_single_title(
     return mkvs[0] if mkvs else None
 
 
+class _ProgressParser:
+    """Parse makemkvcon output lines into RipProgress updates.
+
+    Encapsulates the state tracking (title, bytes, rate) and the
+    six regex handlers that were previously inline in _run_makemkv.
+    """
+
+    def __init__(
+        self,
+        current_title: Title | None = None,
+        debug_harness: _ProgressDebugHarness | None = None,
+    ) -> None:
+        self.title_id = current_title.id if current_title else 0
+        self.title_name = (
+            current_title.name if current_title else "Unknown"
+        )
+        self.start_time = time.monotonic()
+        self.last_current = 0
+        self.last_total = 0
+        self.last_percent = 0.0
+        self.last_rate: float | None = None
+        self.sample_time: float | None = None
+        self.sample_bytes: int | None = None
+        self._debug = debug_harness
+
+    def parse_line(self, line: str) -> tuple[RipProgress, str] | None:
+        """Try each handler; return (progress, source) or None."""
+        result = (
+            self._try_progress_title(line)
+            or self._try_current_title(line)
+            or self._try_human_action(line)
+            or self._try_human_operation(line)
+            or self._try_prgv(line)
+            or self._try_human_progress(line)
+        )
+        if result is None and self._debug:
+            if line.startswith("PR") or line.startswith("Current "):
+                self._debug.record(
+                    "unparsed_progress_line", line=line,
+                )
+        return result
+
+    def _build_progress(self) -> RipProgress:
+        return RipProgress(
+            title_id=self.title_id,
+            title_name=self.title_name,
+            percent=self.last_percent,
+            current_bytes=self.last_current,
+            total_bytes=self.last_total,
+            eta_seconds=_calc_eta(self.last_percent, self.start_time),
+            bytes_per_second=self.last_rate,
+        )
+
+    def _try_progress_title(
+        self, line: str,
+    ) -> tuple[RipProgress, str] | None:
+        m = PROGRESS_TITLE_RE.match(line)
+        if not m:
+            return None
+        self.title_name = m.group(1) or self.title_name
+        if self._debug:
+            self._debug.record(
+                "line_parsed", kind="PRGT",
+                title_name=self.title_name,
+            )
+        return self._build_progress(), "PRGT"
+
+    def _try_current_title(
+        self, line: str,
+    ) -> tuple[RipProgress, str] | None:
+        m = CURRENT_TITLE_RE.match(line)
+        if not m:
+            return None
+        self.title_id = int(m.group(1))
+        self.title_name = m.group(2)
+        if self._debug:
+            self._debug.record(
+                "line_parsed", kind="PRGC",
+                title_id=self.title_id,
+                title_name=self.title_name,
+            )
+        return self._build_progress(), "PRGC"
+
+    def _try_human_action(
+        self, line: str,
+    ) -> tuple[RipProgress, str] | None:
+        m = HUMAN_ACTION_RE.match(line)
+        if not m:
+            return None
+        self.title_name = m.group(1).strip() or self.title_name
+        if self._debug:
+            self._debug.record(
+                "line_parsed", kind="HUMAN_ACTION",
+                title_name=self.title_name,
+            )
+        return self._build_progress(), "HUMAN_ACTION"
+
+    def _try_human_operation(
+        self, line: str,
+    ) -> tuple[RipProgress, str] | None:
+        m = HUMAN_OPERATION_RE.match(line)
+        if not m:
+            return None
+        self.title_name = m.group(1).strip() or self.title_name
+        if self._debug:
+            self._debug.record(
+                "line_parsed", kind="HUMAN_OPERATION",
+                title_name=self.title_name,
+            )
+        return self._build_progress(), "HUMAN_OPERATION"
+
+    def _try_prgv(
+        self, line: str,
+    ) -> tuple[RipProgress, str] | None:
+        m = PROGRESS_RE.match(line)
+        if not m:
+            return None
+        current, maximum = _parse_progress_values(m)
+        percent = _clamp_percent(
+            (current / maximum * 100) if maximum > 0 else 0
+        )
+        if self._debug:
+            self._debug.record(
+                "line_parsed", kind="PRGV",
+                current=current, maximum=maximum, percent=percent,
+            )
+        now = time.monotonic()
+        rate: float | None = None
+        if (
+            self.sample_time is not None
+            and self.sample_bytes is not None
+        ):
+            elapsed = now - self.sample_time
+            delta_bytes = current - self.sample_bytes
+            if elapsed > 0 and delta_bytes >= 0:
+                rate = delta_bytes / elapsed
+        self.sample_time = now
+        self.sample_bytes = current
+        self.last_current = current
+        self.last_total = maximum
+        self.last_percent = percent
+        self.last_rate = rate
+
+        progress = RipProgress(
+            title_id=self.title_id,
+            title_name=self.title_name,
+            percent=percent,
+            current_bytes=current,
+            total_bytes=maximum,
+            eta_seconds=_calc_eta(percent, self.start_time),
+            bytes_per_second=rate,
+        )
+        return progress, "PRGV"
+
+    def _try_human_progress(
+        self, line: str,
+    ) -> tuple[RipProgress, str] | None:
+        m = HUMAN_PROGRESS_RE.match(line)
+        if not m:
+            return None
+        percent = _parse_human_progress_values(m)
+        if self._debug:
+            self._debug.record(
+                "line_parsed", kind="HUMAN_PROGRESS",
+                current_percent=int(m.group(1)),
+                total_percent=int(m.group(2)),
+                percent=percent,
+            )
+        self.last_current = 0
+        self.last_total = 0
+        self.last_percent = percent
+        self.last_rate = None
+        self.sample_time = None
+        self.sample_bytes = None
+        progress = RipProgress(
+            title_id=self.title_id,
+            title_name=self.title_name,
+            percent=percent,
+            current_bytes=0,
+            total_bytes=0,
+            eta_seconds=_calc_eta(percent, self.start_time),
+            bytes_per_second=None,
+        )
+        return progress, "HUMAN_PROGRESS"
+
+
 def _run_makemkv(
     cmd: list[str],
     on_progress: ProgressCallback | None,
@@ -353,15 +539,7 @@ def _run_makemkv(
     with _process_lock:
         _active_process = process
 
-    title_id = current_title.id if current_title else 0
-    title_name = current_title.name if current_title else "Unknown"
-    start_time = time.monotonic()
-    last_current = 0
-    last_total = 0
-    last_percent = 0.0
-    last_rate: float | None = None
-    sample_time: float | None = None
-    sample_bytes: int | None = None
+    parser = _ProgressParser(current_title, debug_harness)
 
     # Wrap the master fd in a buffered text reader for readline()
     master_file = open(master_fd, closefd=True)  # noqa: SIM115
@@ -381,223 +559,14 @@ def _run_makemkv(
             if debug_harness:
                 debug_harness.record("raw_line", line=line)
 
-            matched_progress_line = False
-
-            # Update current status/title from PRGT lines
-            progress_title_match = PROGRESS_TITLE_RE.match(line)
-            if progress_title_match:
-                matched_progress_line = True
-                title_name = (
-                    progress_title_match.group(1) or title_name
-                )
-                if debug_harness:
-                    debug_harness.record(
-                        "line_parsed",
-                        kind="PRGT",
-                        title_name=title_name,
-                    )
-                progress = RipProgress(
-                    title_id=title_id,
-                    title_name=title_name,
-                    percent=last_percent,
-                    current_bytes=last_current,
-                    total_bytes=last_total,
-                    eta_seconds=_calc_eta(last_percent, start_time),
-                    bytes_per_second=last_rate,
-                )
+            result = parser.parse_line(line)
+            if result:
+                progress, source = result
                 _emit_progress_update(
                     progress,
-                    source="PRGT",
+                    source=source,
                     on_progress=on_progress,
                     debug_harness=debug_harness,
-                )
-
-            # Update current title from PRGC lines
-            title_match = CURRENT_TITLE_RE.match(line)
-            if title_match:
-                matched_progress_line = True
-                title_id = int(title_match.group(1))
-                title_name = title_match.group(2)
-                if debug_harness:
-                    debug_harness.record(
-                        "line_parsed",
-                        kind="PRGC",
-                        title_id=title_id,
-                        title_name=title_name,
-                    )
-                progress = RipProgress(
-                    title_id=title_id,
-                    title_name=title_name,
-                    percent=last_percent,
-                    current_bytes=last_current,
-                    total_bytes=last_total,
-                    eta_seconds=_calc_eta(last_percent, start_time),
-                    bytes_per_second=last_rate,
-                )
-                _emit_progress_update(
-                    progress,
-                    source="PRGC",
-                    on_progress=on_progress,
-                    debug_harness=debug_harness,
-                )
-
-            # Update current status from human-readable action lines
-            action_match = HUMAN_ACTION_RE.match(line)
-            if action_match:
-                matched_progress_line = True
-                title_name = action_match.group(1).strip() or title_name
-                if debug_harness:
-                    debug_harness.record(
-                        "line_parsed",
-                        kind="HUMAN_ACTION",
-                        title_name=title_name,
-                    )
-                progress = RipProgress(
-                    title_id=title_id,
-                    title_name=title_name,
-                    percent=last_percent,
-                    current_bytes=last_current,
-                    total_bytes=last_total,
-                    eta_seconds=_calc_eta(last_percent, start_time),
-                    bytes_per_second=last_rate,
-                )
-                _emit_progress_update(
-                    progress,
-                    source="HUMAN_ACTION",
-                    on_progress=on_progress,
-                    debug_harness=debug_harness,
-                )
-
-            operation_match = HUMAN_OPERATION_RE.match(line)
-            if operation_match:
-                matched_progress_line = True
-                title_name = (
-                    operation_match.group(1).strip() or title_name
-                )
-                if debug_harness:
-                    debug_harness.record(
-                        "line_parsed",
-                        kind="HUMAN_OPERATION",
-                        title_name=title_name,
-                    )
-                progress = RipProgress(
-                    title_id=title_id,
-                    title_name=title_name,
-                    percent=last_percent,
-                    current_bytes=last_current,
-                    total_bytes=last_total,
-                    eta_seconds=_calc_eta(last_percent, start_time),
-                    bytes_per_second=last_rate,
-                )
-                _emit_progress_update(
-                    progress,
-                    source="HUMAN_OPERATION",
-                    on_progress=on_progress,
-                    debug_harness=debug_harness,
-                )
-
-            # Parse progress
-            progress_match = PROGRESS_RE.match(line)
-            if progress_match:
-                matched_progress_line = True
-                current, maximum = _parse_progress_values(
-                    progress_match
-                )
-                percent = _clamp_percent(
-                    (current / maximum * 100) if maximum > 0 else 0
-                )
-                if debug_harness:
-                    debug_harness.record(
-                        "line_parsed",
-                        kind="PRGV",
-                        current=current,
-                        maximum=maximum,
-                        percent=percent,
-                    )
-                now = time.monotonic()
-                rate: float | None = None
-                if sample_time is not None and sample_bytes is not None:
-                    elapsed = now - sample_time
-                    delta_bytes = current - sample_bytes
-                    if elapsed > 0 and delta_bytes >= 0:
-                        rate = delta_bytes / elapsed
-                sample_time = now
-                sample_bytes = current
-
-                last_current = current
-                last_total = maximum
-                last_percent = percent
-                last_rate = rate
-
-                eta = _calc_eta(percent, start_time)
-                progress = RipProgress(
-                    title_id=title_id,
-                    title_name=title_name,
-                    percent=percent,
-                    current_bytes=current,
-                    total_bytes=maximum,
-                    eta_seconds=eta,
-                    bytes_per_second=rate,
-                )
-                _emit_progress_update(
-                    progress,
-                    source="PRGV",
-                    on_progress=on_progress,
-                    debug_harness=debug_harness,
-                )
-
-            # Parse human-readable progress fallback
-            human_progress_match = HUMAN_PROGRESS_RE.match(line)
-            if human_progress_match:
-                matched_progress_line = True
-                percent = _parse_human_progress_values(
-                    human_progress_match
-                )
-                if debug_harness:
-                    debug_harness.record(
-                        "line_parsed",
-                        kind="HUMAN_PROGRESS",
-                        current_percent=int(
-                            human_progress_match.group(1)
-                        ),
-                        total_percent=int(
-                            human_progress_match.group(2)
-                        ),
-                        percent=percent,
-                    )
-                last_current = 0
-                last_total = 0
-                last_percent = percent
-                last_rate = None
-                sample_time = None
-                sample_bytes = None
-                progress = RipProgress(
-                    title_id=title_id,
-                    title_name=title_name,
-                    percent=percent,
-                    current_bytes=0,
-                    total_bytes=0,
-                    eta_seconds=_calc_eta(percent, start_time),
-                    bytes_per_second=None,
-                )
-                _emit_progress_update(
-                    progress,
-                    source="HUMAN_PROGRESS",
-                    on_progress=on_progress,
-                    debug_harness=debug_harness,
-                )
-
-            if (
-                debug_harness
-                and (
-                    line.startswith("PR")
-                    or line.startswith("Current ")
-                )
-                and not matched_progress_line
-            ):
-                debug_harness.record(
-                    "unparsed_progress_line",
-                    line=line,
                 )
 
         return_code = process.wait()

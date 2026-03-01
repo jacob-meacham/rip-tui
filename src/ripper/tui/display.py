@@ -6,10 +6,11 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from ripper.core.disc import DiscInfo, ExtraType
+from ripper.core.disc import DiscInfo, ExtraType, Title
 from ripper.core.ripper import RipProgress
 from ripper.metadata.classifier import classify_extra
 from ripper.utils.formatting import fmt_duration, fmt_rate, fmt_size
+from ripper.utils.matching import find_title_for_mkv
 
 console = Console()
 
@@ -95,23 +96,18 @@ def classify_extras_interactive(
             if t.discdb_info and t.discdb_info.item_title:
                 discdb_titles[t.id] = t
 
+    discdb_title_list = list(discdb_titles.values())
+
     for i, path in enumerate(extras):
         size = path.stat().st_size if path.exists() else 0
 
         # Try to match this file to a disc title with DiscDB info
         suggested = None
         label = path.stem
-        stem = path.stem.lower()
-        for title in discdb_titles.values():
-            patterns = [
-                f"t{title.id:02d}",
-                f"title{title.id:02d}",
-                f"title_{title.id}",
-            ]
-            if any(p in stem for p in patterns):
-                label = title.discdb_info.item_title  # type: ignore[union-attr]
-                suggested = title.suggested_extra_type
-                break
+        matched = find_title_for_mkv(path, discdb_title_list)
+        if matched:
+            label = matched.discdb_info.item_title  # type: ignore[union-attr]
+            suggested = matched.suggested_extra_type
 
         if suggested is None:
             suggested = classify_extra(path.stem)
@@ -179,14 +175,14 @@ def classify_extras_interactive(
     return classifications
 
 
-def title_display_name(t) -> str:
+def title_display_name(t: Title) -> str:
     """Best display name for a title: DiscDB item_title or raw name."""
     if t.discdb_info and t.discdb_info.item_title:
         return t.discdb_info.item_title
     return t.name
 
 
-def _title_type_label(t) -> str:
+def _title_type_label(t: Title) -> str:
     """Build the Type column label for a title."""
     if t.discdb_info:
         item_type = t.discdb_info.item_type

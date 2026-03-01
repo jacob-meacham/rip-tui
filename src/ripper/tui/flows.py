@@ -32,6 +32,7 @@ from ripper.tui.display import (
     start_rip_with_status,
 )
 from ripper.utils.drive import eject_disc, wait_for_disc
+from ripper.utils.matching import find_title_for_mkv, match_title_id
 
 logger = logging.getLogger(__name__)
 
@@ -174,16 +175,9 @@ def _match_mkvs_to_titles(
     """Match MKV files to disc titles by tXX pattern in filename."""
     result: dict[Path, Title] = {}
     for mkv in mkvs:
-        stem = mkv.stem.lower()
-        for title in titles:
-            patterns = [
-                f"t{title.id:02d}",
-                f"title{title.id:02d}",
-                f"title_{title.id}",
-            ]
-            if any(p in stem for p in patterns):
-                result[mkv] = title
-                break
+        title = find_title_for_mkv(mkv, titles)
+        if title:
+            result[mkv] = title
     return result
 
 
@@ -293,6 +287,7 @@ def rip_multi_disc(
     name: str,
     disc_count: int,
     backup_dir: Path,
+    merge: bool = True,
 ) -> None:
     """Rip multi-disc movie.
 
@@ -350,7 +345,7 @@ def rip_multi_disc(
             disc_dirs.append(disc_staging)
 
     console.print("  Organizing and merging files...")
-    organize_multi_disc(disc_dirs, name, settings)
+    organize_multi_disc(disc_dirs, name, settings, merge=merge)
 
     if settings.auto_eject:
         eject_disc(settings.device)
@@ -477,14 +472,8 @@ def _try_discdb_episode_match(
     # Match MKV files to title IDs via filename patterns
     episode_map: dict[Path, int] = {}
     for mkv in mkvs:
-        stem = mkv.stem.lower()
         for title_id, ep_num in episode_titles.items():
-            patterns = [
-                f"t{title_id:02d}",
-                f"title{title_id:02d}",
-                f"title_{title_id}",
-            ]
-            if any(p in stem for p in patterns):
+            if match_title_id(mkv.stem, title_id):
                 episode_map[mkv] = ep_num
                 break
 
@@ -582,16 +571,7 @@ def _get_mkv_durations(
     """Get durations for MKV files from disc_info."""
     durations: list[tuple[int, int]] = []
     for i, mkv in enumerate(mkvs):
-        dur = 0
-        stem = mkv.stem.lower()
-        for title in disc_info.titles:
-            patterns = [
-                f"t{title.id:02d}",
-                f"title{title.id:02d}",
-                f"title_{title.id}",
-            ]
-            if any(p in stem for p in patterns):
-                dur = title.duration_seconds
-                break
+        title = find_title_for_mkv(mkv, disc_info.titles)
+        dur = title.duration_seconds if title else 0
         durations.append((i, dur))
     return durations

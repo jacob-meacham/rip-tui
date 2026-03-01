@@ -18,11 +18,6 @@ app = typer.Typer(
 logger = logging.getLogger(__name__)
 
 
-def _log_progress(p) -> None:
-    """Print single-line progress update for CLI commands."""
-    typer.echo(f"\r  {p.title_name}: {p.percent:.1f}%", nl=False)
-
-
 def _get_settings() -> Settings:
     """Load settings, warning on config errors."""
     try:
@@ -86,68 +81,25 @@ def movie(
 ) -> None:
     """Rip a single-disc movie."""
     settings = _get_settings()
-    staging = settings.staging_dir / name
 
-    from ripper.core.organizer import organize_movie
-    from ripper.core.ripper import (
-        backup_disc,
-        remux_all_from_backup,
-        remux_titles_from_backup,
+    from ripper.core.pipeline import setup_rip
+    from ripper.tui.flows import (
+        cleanup_backup,
+        rip_movie_full,
+        rip_movie_main,
     )
-    from ripper.core.scanner import compute_hash_from_backup, scan_disc
-    from ripper.metadata.classifier import classify_titles
-    from ripper.tui.flows import cleanup_backup
-    from ripper.utils.drive import eject_disc
-
-    external = backup is not None
 
     try:
-        typer.echo("Scanning disc...")
-        disc_info = scan_disc(settings)
-        classify_titles(disc_info.titles, settings.min_main_length)
+        disc_info, backup_dir = setup_rip(settings, backup)
 
-        if external:
-            backup_dir = backup
-        else:
-            typer.echo("Backing up disc...")
-            backup_dir = staging / ".backup"
-            backup_disc(
-                backup_dir, settings, on_progress=_log_progress
-            )
-            typer.echo("")
-
-        content_hash = compute_hash_from_backup(backup_dir)
-        if content_hash:
-            disc_info.content_hash = content_hash
-
-        typer.echo(f"Remuxing: {name}")
         if no_extras:
-            main_titles = [
-                t for t in disc_info.titles if t.is_main_feature
-            ]
-            if not main_titles:
-                main_titles = sorted(
-                    disc_info.titles,
-                    key=lambda t: t.duration_seconds,
-                    reverse=True,
-                )[:1]
-            remux_titles_from_backup(
-                backup_dir, main_titles, staging, settings,
-                on_progress=_log_progress,
-            )
+            rip_movie_main(settings, disc_info, name, backup_dir)
         else:
-            remux_all_from_backup(
-                backup_dir, staging, settings,
-                on_progress=_log_progress,
-            )
+            rip_movie_full(settings, disc_info, name, backup_dir)
 
-        typer.echo("")
-        organize_movie(staging, name, settings)
-        if not external:
-            cleanup_backup(staging)
+        if backup is None:
+            cleanup_backup(settings.staging_dir / name)
 
-        if settings.auto_eject:
-            eject_disc(settings.device)
         typer.echo(f"Done: {settings.movies_dir / name}")
     except RipCancelledError:
         typer.echo("\nCancelled by user.", err=True)
@@ -186,70 +138,20 @@ def multi(
     """Rip a multi-disc movie."""
     settings = _get_settings()
 
-    from ripper.core.organizer import organize_multi_disc
-    from ripper.core.ripper import backup_disc, remux_all_from_backup
-    from ripper.core.scanner import compute_hash_from_backup, scan_disc
-    from ripper.metadata.classifier import classify_titles
-    from ripper.tui.flows import cleanup_backup
-    from ripper.utils.drive import eject_disc, wait_for_disc
+    from ripper.core.pipeline import setup_rip
+    from ripper.tui.flows import cleanup_backup, rip_multi_disc
 
     try:
-        disc_dirs: list[Path] = []
+        disc_info, backup_dir = setup_rip(settings, backup)
 
-        for d in range(1, discs + 1):
-            if d > 1:
-                eject_disc(settings.device)
-                typer.echo(f"\nInsert disc {d} and press Enter...")
-                input()
-                typer.echo("Waiting for disc...")
-                if not wait_for_disc(settings.device):
-                    typer.echo(
-                        f"Timed out waiting for disc {d}",
-                        err=True,
-                    )
-                    raise typer.Exit(1)
+        rip_multi_disc(
+            settings, disc_info, name, discs, backup_dir,
+            merge=not no_merge,
+        )
 
-            disc_staging = settings.staging_dir / f"{name}-disc{d}"
+        if backup is None:
+            cleanup_backup(settings.staging_dir / name)
 
-            # Use external backup for disc 1 if provided
-            external = d == 1 and backup is not None
-            if external:
-                backup_dir = backup  # type: ignore[assignment]
-            else:
-                backup_dir = disc_staging / ".backup"
-
-            typer.echo(f"Scanning disc {d}...")
-            disc_info = scan_disc(settings)
-            classify_titles(
-                disc_info.titles, settings.min_main_length
-            )
-
-            if not external:
-                typer.echo(f"Backing up disc {d}/{discs}...")
-                backup_disc(
-                    backup_dir, settings,
-                    on_progress=_log_progress,
-                )
-                typer.echo("")
-
-            content_hash = compute_hash_from_backup(backup_dir)
-            if content_hash:
-                disc_info.content_hash = content_hash
-
-            typer.echo(f"Remuxing disc {d}/{discs}...")
-            remux_all_from_backup(
-                backup_dir, disc_staging, settings,
-                on_progress=_log_progress,
-            )
-            typer.echo("")
-            if not external:
-                cleanup_backup(disc_staging)
-            disc_dirs.append(disc_staging)
-
-        organize_multi_disc(disc_dirs, name, settings, merge=not no_merge)
-
-        if settings.auto_eject:
-            eject_disc(settings.device)
         typer.echo(f"Done: {settings.movies_dir / name}")
     except RipCancelledError:
         typer.echo("\nCancelled by user.", err=True)
@@ -281,55 +183,19 @@ def tv(
 ) -> None:
     """Rip a TV disc and organize episodes."""
     settings = _get_settings()
-    staging = settings.staging_dir / f"{show}-S{season:02d}"
 
-    from ripper.core.organizer import find_mkv_files, organize_tv
-    from ripper.core.ripper import backup_disc, remux_all_from_backup
-    from ripper.core.scanner import compute_hash_from_backup, scan_disc
-    from ripper.metadata.classifier import classify_titles
-    from ripper.tui.flows import cleanup_backup
-    from ripper.utils.drive import eject_disc
-
-    external = backup is not None
+    from ripper.core.pipeline import setup_rip
+    from ripper.tui.flows import cleanup_backup, rip_tv
 
     try:
-        typer.echo("Scanning disc...")
-        disc_info = scan_disc(settings)
-        classify_titles(disc_info.titles, settings.min_main_length)
+        disc_info, backup_dir = setup_rip(settings, backup)
+        rip_tv(settings, disc_info, show, season, backup_dir)
 
-        if external:
-            backup_dir = backup
-        else:
-            typer.echo("Backing up disc...")
-            backup_dir = staging / ".backup"
-            backup_disc(
-                backup_dir, settings, on_progress=_log_progress
-            )
-            typer.echo("")
-
-        content_hash = compute_hash_from_backup(backup_dir)
-        if content_hash:
-            disc_info.content_hash = content_hash
-
-        typer.echo(f"Remuxing: {show} Season {season}")
-        remux_all_from_backup(
-            backup_dir, staging, settings,
-            on_progress=_log_progress,
-        )
-        typer.echo("")
-
-        # Auto-map by size (largest first)
-        mkvs = find_mkv_files(staging)
-        episode_map = {mkv: i + 1 for i, mkv in enumerate(mkvs)}
-
-        season_dir = organize_tv(
-            staging, show, season, episode_map, settings
-        )
-        if not external:
+        staging = settings.staging_dir / f"{show}-S{season:02d}"
+        if backup is None:
             cleanup_backup(staging)
 
-        if settings.auto_eject:
-            eject_disc(settings.device)
+        season_dir = settings.tv_dir / show / f"Season {season:02d}"
         typer.echo(f"Done: {season_dir}")
     except RipCancelledError:
         typer.echo("\nCancelled by user.", err=True)

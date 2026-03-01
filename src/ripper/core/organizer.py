@@ -169,7 +169,7 @@ def organize_movie(
         main_mkv = mkvs[0]
     main_dest = dest / f"{movie_name}.mkv"
     logger.info("Main feature: %s -> %s", main_mkv.name, main_dest.name)
-    shutil.move(str(main_mkv), str(main_dest))
+    shutil.move(main_mkv, main_dest)
 
     # Organize extras
     extras = [m for m in mkvs if m != main_mkv]
@@ -190,7 +190,7 @@ def organize_movie(
             else sanitize_filename(extra.stem) + extra.suffix
         )
         logger.info("  -> %s/%s", extra_type.value, dest_name)
-        shutil.move(str(extra), str(extra_dir / dest_name))
+        shutil.move(extra, extra_dir / dest_name)
 
     # Clean up empty staging dir
     _remove_if_empty(staging_dir)
@@ -225,7 +225,7 @@ def organize_tv(
         ep_name = f"{show_name} - S{season_num:02d}E{ep_num:02d}.mkv"
         dest = season_dir / ep_name
         logger.info("  -> %s", ep_name)
-        shutil.move(str(mkv_path), str(dest))
+        shutil.move(mkv_path, dest)
 
     _remove_if_empty(staging_dir)
 
@@ -272,9 +272,9 @@ def organize_multi_disc(
         # Emby multi-part naming
         for i, seg in enumerate(main_segments, 1):
             part_name = f"{movie_name} - part{i}.mkv"
-            shutil.move(str(seg), str(dest / part_name))
+            shutil.move(seg, dest / part_name)
     else:
-        shutil.move(str(main_segments[0]), str(dest / f"{movie_name}.mkv"))
+        shutil.move(main_segments[0], dest / f"{movie_name}.mkv")
 
     # Organize extras from all discs
     if extras_map is None:
@@ -285,7 +285,7 @@ def organize_multi_disc(
         extra_dir = dest / extra_type.value
         extra_dir.mkdir(exist_ok=True)
         dest_name = sanitize_filename(extra.stem) + extra.suffix
-        shutil.move(str(extra), str(extra_dir / dest_name))
+        shutil.move(extra, extra_dir / dest_name)
 
     # Clean up disc staging dirs
     for disc_dir in disc_dirs:
@@ -300,7 +300,7 @@ def _merge_segments(segments: list[Path], dest: Path, movie_name: str) -> None:
     if not shutil.which("mkvmerge"):
         logger.warning("mkvmerge not found, falling back to multi-part naming")
         for i, seg in enumerate(segments, 1):
-            shutil.move(str(seg), str(dest / f"{movie_name} - part{i}.mkv"))
+            shutil.move(seg, dest / f"{movie_name} - part{i}.mkv")
         return
 
     output = dest / f"{movie_name}.mkv"
@@ -319,7 +319,7 @@ def _merge_segments(segments: list[Path], dest: Path, movie_name: str) -> None:
         logger.error("mkvmerge failed: %s", result.stderr)
         logger.warning("Falling back to multi-part naming")
         for i, seg in enumerate(segments, 1):
-            shutil.move(str(seg), str(dest / f"{movie_name} - part{i}.mkv"))
+            shutil.move(seg, dest / f"{movie_name} - part{i}.mkv")
 
 
 def _remove_if_empty(path: Path) -> None:
