@@ -79,6 +79,7 @@ def start_rip_with_status(
 
 def classify_extras_interactive(
     extras: list[Path],
+    disc_info: DiscInfo | None = None,
 ) -> dict[Path, ExtraType]:
     """Interactive extras classification using a selection menu."""
     classifications: dict[Path, ExtraType] = {}
@@ -87,12 +88,37 @@ def classify_extras_interactive(
     console.print("  [bold]Classify extras for Emby:[/]")
     console.print()
 
+    # Build title lookup from disc_info for DiscDB names
+    discdb_titles = {}
+    if disc_info:
+        for t in disc_info.titles:
+            if t.discdb_info and t.discdb_info.item_title:
+                discdb_titles[t.id] = t
+
     for i, path in enumerate(extras):
         size = path.stat().st_size if path.exists() else 0
-        suggested = classify_extra(path.stem)
+
+        # Try to match this file to a disc title with DiscDB info
+        suggested = None
+        label = path.stem
+        stem = path.stem.lower()
+        for title in discdb_titles.values():
+            patterns = [
+                f"t{title.id:02d}",
+                f"title{title.id:02d}",
+                f"title_{title.id}",
+            ]
+            if any(p in stem for p in patterns):
+                label = title.discdb_info.item_title  # type: ignore[union-attr]
+                suggested = title.suggested_extra_type
+                break
+
+        if suggested is None:
+            suggested = classify_extra(path.stem)
+
         classifications[path] = suggested
         console.print(
-            f"  [cyan]{i + 1:>2d}[/]  {path.name[:40]:<40s}  "
+            f"  [cyan]{i + 1:>2d}[/]  {label[:40]:<40s}  "
             f"{fmt_size(size):>8s}  [dim][{suggested.value}][/]"
         )
 
@@ -153,25 +179,57 @@ def classify_extras_interactive(
     return classifications
 
 
-def print_title_table(disc_info: DiscInfo) -> None:
+def title_display_name(t) -> str:
+    """Best display name for a title: DiscDB item_title or raw name."""
+    if t.discdb_info and t.discdb_info.item_title:
+        return t.discdb_info.item_title
+    return t.name
+
+
+def _title_type_label(t) -> str:
+    """Build the Type column label for a title."""
+    if t.discdb_info:
+        item_type = t.discdb_info.item_type
+        if item_type == "Episode" and t.discdb_info.season is not None:
+            return f"[green]S{t.discdb_info.season}E{t.discdb_info.episode}[/]"
+        return f"[green]{item_type}[/]"
+    if t.suggested_extra_type:
+        return f"[dim]{t.suggested_extra_type.value}[/]"
+    if t.is_main_feature:
+        return "[bold]Main[/]"
+    return ""
+
+
+def print_title_table(
+    disc_info: DiscInfo, show_source: bool = False,
+) -> None:
     """Print title table using Rich."""
     table = Table(show_header=True, padding=(0, 1))
     table.add_column("", width=1)
     table.add_column("ID", justify="right", width=3)
+    if show_source:
+        table.add_column("Source", min_width=12)
     table.add_column("Name", min_width=30)
+    table.add_column("Type", min_width=10)
     table.add_column("Duration", justify="right")
     table.add_column("Size", justify="right")
     table.add_column("Ch", justify="right")
 
     for t in disc_info.titles:
         marker = "[bold]*[/]" if t.is_main_feature else ""
-        table.add_row(
+        row = [
             marker,
             str(t.id),
-            t.name[:45],
+        ]
+        if show_source:
+            row.append(f"[dim]{t.source_file}[/]" if t.source_file else "")
+        row.extend([
+            title_display_name(t)[:45],
+            _title_type_label(t),
             t.duration_display,
             t.size_display,
             str(t.chapter_count),
-        )
+        ])
+        table.add_row(*row)
 
     console.print(table)

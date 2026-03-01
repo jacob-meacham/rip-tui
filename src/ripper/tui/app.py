@@ -5,6 +5,7 @@ import inspect
 import logging
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -15,17 +16,24 @@ from ripper.config.settings import Settings
 from ripper.core.disc import DiscInfo, MediaType
 from ripper.core.ripper import RipCancelledError
 from ripper.core.scanner import scan_disc
-from ripper.metadata.classifier import classify_titles, detect_media_type
+from ripper.metadata.classifier import (
+    classify_titles,
+    detect_media_type,
+)
 from ripper.metadata.matcher import clean_disc_name
-from ripper.tui.display import print_title_table
+from ripper.tui.display import print_title_table, title_display_name
 from ripper.tui.flows import (
+    backup_is_valid,
+    cleanup_backup,
+    create_backup,
+    enrich_disc_info,
     rip_movie_full,
     rip_movie_main,
     rip_multi_disc,
     rip_selected,
     rip_tv,
 )
-from ripper.utils.formatting import fmt_duration, fmt_size
+from ripper.utils.formatting import fmt_duration, fmt_size, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +48,60 @@ def _is_back_command(raw: str) -> bool:
     return raw.strip().lower() in _BACK_COMMANDS
 
 
-def run_interactive(settings: Settings) -> None:
-    """Main interactive CLI flow."""
-    # Interactive mode should stay visually clean.
-    logging.getLogger().setLevel(logging.WARNING)
+def run_interactive(
+    settings: Settings,
+    external_backup: Path | None = None,
+    verbose: bool = False,
+) -> None:
+    """Main interactive CLI flow.
+
+    Args:
+        settings: App settings.
+        external_backup: Optional path to a pre-existing backup dir.
+            When provided, skips the backup step and never cleans up
+            the backup on exit.
+        verbose: Show debug output including source files and DiscDB matching.
+    """
+    # Interactive mode should stay visually clean, unless verbose.
+    if not verbose:
+        logging.getLogger().setLevel(logging.WARNING)
 
     console.print()
 
-    # Scan disc (with spinner)
-    disc_info = _scan_disc(settings)
+    # Resolve backup: use external path, resume existing, or create new
+    own_backup = external_backup is None
+    if external_backup is not None:
+        if not backup_is_valid(external_backup):
+            console.print(
+                f"  [red]Invalid backup: {external_backup}[/]"
+            )
+            console.print(
+                "  [dim]Expected BDMV/STREAM with .m2ts files[/]"
+            )
+            return
+        backup_dir = external_backup
+    else:
+        # Check for existing backup before scanning the disc
+        pending_backup = settings.staging_dir / ".backup"
+        if backup_is_valid(pending_backup):
+            try:
+                answer = input(
+                    "  Previous backup found. Reuse it? [Y/n]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer in ("", "y", "yes"):
+                backup_dir = pending_backup
+            else:
+                backup_dir = None  # will create fresh below
+        else:
+            backup_dir = None
+
+    # Scan from backup if available, otherwise from physical disc
+    if backup_dir is not None:
+        disc_info = _scan_disc(settings, backup_dir=backup_dir)
+    else:
+        disc_info = _scan_disc(settings)
     if disc_info is None:
         return
 
@@ -56,39 +109,78 @@ def run_interactive(settings: Settings) -> None:
     # before the user finishes navigating prompts
     tmdb_thread = _start_tmdb_lookup(disc_info, settings)
 
-    # Menu loop — flows return here on cancel/back
+    # Create fresh backup if we don't have one yet
+    if backup_dir is None:
+        backup_dir = create_backup(settings, settings.staging_dir)
+
+    enrich_disc_info(disc_info, backup_dir, settings)
+
+    # Show enriched disc summary
+    _show_disc_summary(disc_info, verbose=verbose)
+
+    # Menu loop — flows return here on cancel/back.
     while True:
         choice = _show_menu()
         if choice is None:
-            return
+            break
 
-        # Wait for TMDb before any flow that needs a name
+        # Wait for TMDb metadata before any flow that needs a name
         if choice != 5:
             _await_tmdb(tmdb_thread)
 
         if choice == 0:
-            _flow_movie(settings, disc_info, mode="full")
+            _flow_movie(
+                settings, disc_info, mode="full",
+                backup_dir=backup_dir,
+            )
         elif choice == 1:
-            _flow_movie(settings, disc_info, mode="main")
+            _flow_movie(
+                settings, disc_info, mode="main",
+                backup_dir=backup_dir,
+            )
         elif choice == 2:
-            _flow_movie(settings, disc_info, mode="multi")
+            _flow_movie(
+                settings, disc_info, mode="multi",
+                backup_dir=backup_dir,
+            )
         elif choice == 3:
-            _flow_tv(settings, disc_info)
+            _flow_tv(
+                settings, disc_info, backup_dir=backup_dir
+            )
         elif choice == 4:
             _await_tmdb(tmdb_thread)
-            _flow_select(settings, disc_info)
+            _flow_select(
+                settings, disc_info, backup_dir=backup_dir
+            )
         elif choice == 5:
             _show_disc_info(disc_info)
+
+    # Prompt to clean up backup on normal exit.
+    # Ctrl+C skips this, leaving the backup for next run.
+    if own_backup and backup_is_valid(backup_dir):
+        try:
+            answer = input(
+                "  Delete backup? [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return
+        if answer in ("y", "yes"):
+            cleanup_backup(settings.staging_dir)
+            console.print("  [dim]Backup removed.[/]")
 
 
 # ── Scanning ─────────────────────────────────────────────────────────
 
 
-def _scan_disc(settings: Settings) -> DiscInfo | None:
-    """Scan disc with a live spinner, then print summary."""
-    with console.status("  Scanning disc...", spinner="dots"):
+def _scan_disc(
+    settings: Settings, backup_dir: Path | None = None,
+) -> DiscInfo | None:
+    """Scan disc (or backup) with a live spinner, then classify."""
+    label = "Scanning backup..." if backup_dir else "Scanning disc..."
+    with console.status(f"  {label}", spinner="dots"):
         try:
-            disc_info = scan_disc(settings)
+            disc_info = scan_disc(settings, backup_dir=backup_dir)
         except Exception as e:
             console.print(f"  [red]Scan failed: {e}[/]")
             return None
@@ -122,6 +214,21 @@ def _scan_disc(settings: Settings) -> DiscInfo | None:
     console.print()
 
     return disc_info
+
+
+def _show_disc_summary(
+    disc_info: DiscInfo, verbose: bool = False,
+) -> None:
+    """Print enriched disc summary after backup + DiscDB."""
+    if disc_info.discdb_title:
+        console.print()
+        console.print(
+            f"  [green]TheDiscDB[/]: {disc_info.discdb_title}"
+            f" ({disc_info.discdb_year or '?'})"
+        )
+    console.print()
+    print_title_table(disc_info, show_source=verbose)
+    console.print()
 
 
 def _start_tmdb_lookup(
@@ -231,6 +338,8 @@ def _show_menu() -> int | None:
 
     if idx is None:
         return None
+    if isinstance(idx, tuple):
+        return idx[0]
     return idx
 
 
@@ -238,12 +347,18 @@ def _show_menu() -> int | None:
 
 
 def _suggested_name(disc_info: DiscInfo) -> str:
-    """Best movie name from TMDb or disc name."""
-    if disc_info.tmdb_title and disc_info.year:
-        return f"{disc_info.tmdb_title} ({disc_info.year})"
-    if disc_info.tmdb_title:
-        return disc_info.tmdb_title
-    return clean_disc_name(disc_info.name)
+    """Best movie name from DiscDB, TMDb, or disc name."""
+    if disc_info.discdb_title and disc_info.discdb_year:
+        raw = f"{disc_info.discdb_title} ({disc_info.discdb_year})"
+    elif disc_info.discdb_title:
+        raw = disc_info.discdb_title
+    elif disc_info.tmdb_title and disc_info.year:
+        raw = f"{disc_info.tmdb_title} ({disc_info.year})"
+    elif disc_info.tmdb_title:
+        raw = disc_info.tmdb_title
+    else:
+        raw = clean_disc_name(disc_info.name)
+    return sanitize_filename(raw)
 
 
 def _prompt_movie_name(disc_info: DiscInfo) -> str | None:
@@ -280,19 +395,28 @@ def _prompt_disc_count() -> int | None:
         return None
 
 
-def _prompt_tv_info() -> tuple[str, int] | None:
+def _prompt_tv_info(
+    suggested_show: str | None = None,
+) -> tuple[str, int] | None:
     """Prompt for TV show name and season."""
     console.print()
+    if suggested_show:
+        prompt = f"  Show name [{suggested_show}] (b=back): "
+    else:
+        prompt = "  Show name (b=back): "
     try:
-        show = input("  Show name (b=back): ").strip()
+        show = input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
         console.print()
         return None
     if _is_back_command(show):
         return None
     if not show:
-        console.print("  [red]Show name cannot be empty[/]")
-        return None
+        if suggested_show:
+            show = suggested_show
+        else:
+            console.print("  [red]Show name cannot be empty[/]")
+            return None
 
     try:
         raw = input("  Season number [1] (b=back): ").strip()
@@ -320,8 +444,9 @@ def _select_titles(disc_info: DiscInfo) -> set[int] | None:
     entries: list[str] = []
     for t in disc_info.titles:
         marker = "*" if t.is_main_feature else " "
+        display = title_display_name(t)
         entries.append(
-            f"{marker} {t.id:>2d}  {t.name[:35]:<35s}"
+            f"{marker} {t.id:>2d}  {display[:35]:<35s}"
             f"  {t.duration_display:>11s}"
             f"  {t.size_display:>8s}"
         )
@@ -388,26 +513,35 @@ def _confirm_rip(
         "select": "Selected titles",
     }
 
-    titles = _get_titles(disc_info, mode, selected_ids)
-    total_size = sum(t.size_bytes for t in titles)
-    total_dur = sum(t.duration_seconds for t in titles)
+    rip_titles = _get_titles(disc_info, mode, selected_ids)
+    rip_ids = {t.id for t in rip_titles}
+    total_size = sum(t.size_bytes for t in rip_titles)
+    total_dur = sum(t.duration_seconds for t in rip_titles)
 
     console.print()
     console.print(f"  [bold]Ready to rip: {name}[/]")
     console.print(f"  Mode: {mode_labels.get(mode, mode)}")
     console.print(
-        f"  Titles: {len(titles)}"
+        f"  Titles: {len(rip_titles)}"
         f" | ~{fmt_size(total_size)}"
         f" | {fmt_duration(total_dur)}"
     )
     console.print()
 
-    for t in titles:
-        marker = "*" if t.is_main_feature else " "
-        console.print(
-            f"   {marker} {t.id:>2d}  {t.name[:35]:<35s}  "
-            f"{t.duration_display:>11s}  {t.size_display:>8s}"
-        )
+    for t in disc_info.titles:
+        selected = t.id in rip_ids
+        marker = "*" if selected else " "
+        display = title_display_name(t)
+        if selected:
+            console.print(
+                f"   {marker} {t.id:>2d}  {display[:35]:<35s}  "
+                f"{t.duration_display:>11s}  {t.size_display:>8s}"
+            )
+        else:
+            console.print(
+                f"   {marker} {t.id:>2d}  [dim]{display[:35]:<35s}  "
+                f"{t.duration_display:>11s}  {t.size_display:>8s}[/]"
+            )
 
     console.print()
     try:
@@ -430,6 +564,10 @@ def _get_titles(
         return disc_info.main_titles
     if selected_ids is not None:
         return [t for t in disc_info.titles if t.id in selected_ids]
+    if mode == "full":
+        discdb = [t for t in disc_info.titles if t.discdb_info]
+        if discdb:
+            return discdb
     return disc_info.titles
 
 
@@ -438,6 +576,14 @@ def _get_titles(
 
 def _show_disc_info(disc_info: DiscInfo) -> None:
     """Print a formatted title table."""
+    console.print()
+    if disc_info.discdb_title:
+        console.print(
+            f"  [green]TheDiscDB[/]: {disc_info.discdb_title}"
+            f" ({disc_info.discdb_year or '?'})"
+        )
+    else:
+        console.print("  [dim]TheDiscDB: no match[/]")
     console.print()
     print_title_table(disc_info)
     console.print()
@@ -449,7 +595,10 @@ def _show_disc_info(disc_info: DiscInfo) -> None:
 
 
 def _flow_movie(
-    settings: Settings, disc_info: DiscInfo, mode: str
+    settings: Settings,
+    disc_info: DiscInfo,
+    mode: str,
+    backup_dir: Path,
 ) -> None:
     """Movie rip flow (full, main, or multi)."""
     name = _prompt_movie_name(disc_info)
@@ -469,11 +618,13 @@ def _flow_movie(
 
     try:
         if mode == "full":
-            rip_movie_full(settings, disc_info, name)
+            rip_movie_full(settings, disc_info, name, backup_dir)
         elif mode == "main":
-            rip_movie_main(settings, disc_info, name)
+            rip_movie_main(settings, disc_info, name, backup_dir)
         elif mode == "multi":
-            rip_multi_disc(settings, disc_info, name, disc_count)
+            rip_multi_disc(
+                settings, disc_info, name, disc_count, backup_dir
+            )
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
@@ -481,9 +632,16 @@ def _flow_movie(
         logger.error("Rip failed: %s", e, exc_info=True)
 
 
-def _flow_tv(settings: Settings, disc_info: DiscInfo) -> None:
+def _flow_tv(
+    settings: Settings,
+    disc_info: DiscInfo,
+    backup_dir: Path,
+) -> None:
     """TV episode rip flow."""
-    result = _prompt_tv_info()
+    suggested_show = None
+    if disc_info.discdb_media_type == MediaType.TV_SHOW:
+        suggested_show = disc_info.discdb_title
+    result = _prompt_tv_info(suggested_show=suggested_show)
     if result is None:
         return
     show, season = result
@@ -492,7 +650,7 @@ def _flow_tv(settings: Settings, disc_info: DiscInfo) -> None:
         return
 
     try:
-        rip_tv(settings, disc_info, show, season)
+        rip_tv(settings, disc_info, show, season, backup_dir)
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
@@ -501,7 +659,9 @@ def _flow_tv(settings: Settings, disc_info: DiscInfo) -> None:
 
 
 def _flow_select(
-    settings: Settings, disc_info: DiscInfo
+    settings: Settings,
+    disc_info: DiscInfo,
+    backup_dir: Path,
 ) -> None:
     """Selected titles rip flow."""
     selected_ids = _select_titles(disc_info)
@@ -516,7 +676,9 @@ def _flow_select(
         return
 
     try:
-        rip_selected(settings, disc_info, name, selected_ids)
+        rip_selected(
+            settings, disc_info, name, selected_ids, backup_dir
+        )
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:

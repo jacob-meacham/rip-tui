@@ -2,10 +2,14 @@
 
 import tomllib
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 
 class Settings(BaseSettings):
@@ -23,6 +27,7 @@ class Settings(BaseSettings):
     tmdb_api_key: str = ""
     auto_lookup: bool = True
     fuzzy_threshold: int = Field(default=75, ge=0, le=100)
+    discdb_enabled: bool = True
 
     # Paths
     staging_dir: Path = Path("/mnt/media/Rips-Staging")
@@ -62,6 +67,7 @@ class Settings(BaseSettings):
             "tmdb_api_key",
             "auto_lookup",
             "fuzzy_threshold",
+            "discdb_enabled",
             "staging_dir",
             "movies_dir",
             "tv_dir",
@@ -79,7 +85,12 @@ class Settings(BaseSettings):
 
         metadata = data.get("metadata")
         if isinstance(metadata, dict):
-            for key in ("tmdb_api_key", "auto_lookup", "fuzzy_threshold"):
+            for key in (
+                "tmdb_api_key",
+                "auto_lookup",
+                "fuzzy_threshold",
+                "discdb_enabled",
+            ):
                 if key in metadata:
                     normalized[key] = metadata[key]
 
@@ -112,21 +123,12 @@ class Settings(BaseSettings):
 
     @classmethod
     def settings_customise_sources(
-        cls, settings_cls, **kwargs
-    ):
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: "PydanticBaseSettingsSource",
+        env_settings: "PydanticBaseSettingsSource",
+        dotenv_settings: "PydanticBaseSettingsSource",
+        file_secret_settings: "PydanticBaseSettingsSource",
+    ) -> tuple[Any, ...]:
         """Load from init kwargs, then env vars, then TOML file."""
-        from pydantic_settings import EnvSettingsSource
-
-        init_settings = kwargs.get("init_settings")
-        env_settings = kwargs.get("env_settings")
-        sources = []
-        if init_settings:
-            sources.append(init_settings)
-        if env_settings:
-            sources.append(env_settings)
-        else:
-            sources.append(EnvSettingsSource(settings_cls))
-
-        sources.append(cls._load_toml_settings)
-
-        return tuple(sources)
+        return (init_settings, env_settings, cls._load_toml_settings)

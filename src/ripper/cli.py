@@ -34,9 +34,27 @@ def _get_settings() -> Settings:
 
 
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context) -> None:
+def main(
+    ctx: typer.Context,
+    backup: Path | None = typer.Option(
+        None,
+        "--backup",
+        "-b",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="Path to existing BDMV backup (skips backup step).",
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output.",
+    ),
+) -> None:
     """Launch interactive TUI if no subcommand given."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
 
     if ctx.invoked_subcommand is not None:
         return
@@ -44,14 +62,26 @@ def main(ctx: typer.Context) -> None:
     from ripper.tui.app import run_interactive
 
     settings = _get_settings()
-    run_interactive(settings)
+    run_interactive(settings, external_backup=backup, verbose=verbose)
 
 
 @app.command()
 def movie(
-    name: str = typer.Argument(..., help="Movie name with year, e.g. 'Dune (2021)'"),
+    name: str = typer.Argument(
+        ..., help="Movie name with year, e.g. 'Dune (2021)'"
+    ),
     no_extras: bool = typer.Option(
         False, "--no-extras", help="Skip extras, rip main feature only"
+    ),
+    backup: Path | None = typer.Option(
+        None,
+        "--backup",
+        "-b",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="Path to existing BDMV backup (skips backup step).",
     ),
 ) -> None:
     """Rip a single-disc movie."""
@@ -59,30 +89,62 @@ def movie(
     staging = settings.staging_dir / name
 
     from ripper.core.organizer import organize_movie
-    from ripper.core.ripper import rip_all_titles
-    from ripper.core.scanner import scan_disc
+    from ripper.core.ripper import (
+        backup_disc,
+        remux_all_from_backup,
+        remux_titles_from_backup,
+    )
+    from ripper.core.scanner import compute_hash_from_backup, scan_disc
+    from ripper.metadata.classifier import classify_titles
+    from ripper.tui.flows import cleanup_backup
     from ripper.utils.drive import eject_disc
 
+    external = backup is not None
+
     try:
-        typer.echo(f"Ripping: {name}")
+        typer.echo("Scanning disc...")
+        disc_info = scan_disc(settings)
+        classify_titles(disc_info.titles, settings.min_main_length)
 
+        if external:
+            backup_dir = backup
+        else:
+            typer.echo("Backing up disc...")
+            backup_dir = staging / ".backup"
+            backup_disc(
+                backup_dir, settings, on_progress=_log_progress
+            )
+            typer.echo("")
+
+        content_hash = compute_hash_from_backup(backup_dir)
+        if content_hash:
+            disc_info.content_hash = content_hash
+
+        typer.echo(f"Remuxing: {name}")
         if no_extras:
-            from ripper.core.ripper import rip_titles
-
-            disc = scan_disc(settings)
-            main_titles = [t for t in disc.titles if t.is_main_feature]
+            main_titles = [
+                t for t in disc_info.titles if t.is_main_feature
+            ]
             if not main_titles:
                 main_titles = sorted(
-                    disc.titles,
+                    disc_info.titles,
                     key=lambda t: t.duration_seconds,
                     reverse=True,
                 )[:1]
-            rip_titles(main_titles, staging, settings, on_progress=_log_progress)
+            remux_titles_from_backup(
+                backup_dir, main_titles, staging, settings,
+                on_progress=_log_progress,
+            )
         else:
-            rip_all_titles(staging, settings, on_progress=_log_progress)
+            remux_all_from_backup(
+                backup_dir, staging, settings,
+                on_progress=_log_progress,
+            )
 
         typer.echo("")
         organize_movie(staging, name, settings)
+        if not external:
+            cleanup_backup(staging)
 
         if settings.auto_eject:
             eject_disc(settings.device)
@@ -99,16 +161,36 @@ def movie(
 @app.command()
 def multi(
     name: str = typer.Argument(..., help="Movie name with year"),
-    discs: int = typer.Option(2, "--discs", "-d", help="Number of discs"),
+    discs: int = typer.Option(
+        2, "--discs", "-d", help="Number of discs"
+    ),
     no_merge: bool = typer.Option(
-        False, "--no-merge", help="Keep parts separate instead of merging"
+        False,
+        "--no-merge",
+        help="Keep parts separate instead of merging",
+    ),
+    backup: Path | None = typer.Option(
+        None,
+        "--backup",
+        "-b",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help=(
+            "Path to existing BDMV backup for disc 1"
+            " (skips backup step)."
+        ),
     ),
 ) -> None:
     """Rip a multi-disc movie."""
     settings = _get_settings()
 
     from ripper.core.organizer import organize_multi_disc
-    from ripper.core.ripper import rip_all_titles
+    from ripper.core.ripper import backup_disc, remux_all_from_backup
+    from ripper.core.scanner import compute_hash_from_backup, scan_disc
+    from ripper.metadata.classifier import classify_titles
+    from ripper.tui.flows import cleanup_backup
     from ripper.utils.drive import eject_disc, wait_for_disc
 
     try:
@@ -121,15 +203,49 @@ def multi(
                 input()
                 typer.echo("Waiting for disc...")
                 if not wait_for_disc(settings.device):
-                    typer.echo(f"Timed out waiting for disc {d}", err=True)
+                    typer.echo(
+                        f"Timed out waiting for disc {d}",
+                        err=True,
+                    )
                     raise typer.Exit(1)
 
             disc_staging = settings.staging_dir / f"{name}-disc{d}"
-            typer.echo(f"Ripping disc {d}/{discs}...")
-            rip_all_titles(disc_staging, settings, on_progress=_log_progress)
+
+            # Use external backup for disc 1 if provided
+            external = d == 1 and backup is not None
+            if external:
+                backup_dir = backup  # type: ignore[assignment]
+            else:
+                backup_dir = disc_staging / ".backup"
+
+            typer.echo(f"Scanning disc {d}...")
+            disc_info = scan_disc(settings)
+            classify_titles(
+                disc_info.titles, settings.min_main_length
+            )
+
+            if not external:
+                typer.echo(f"Backing up disc {d}/{discs}...")
+                backup_disc(
+                    backup_dir, settings,
+                    on_progress=_log_progress,
+                )
+                typer.echo("")
+
+            content_hash = compute_hash_from_backup(backup_dir)
+            if content_hash:
+                disc_info.content_hash = content_hash
+
+            typer.echo(f"Remuxing disc {d}/{discs}...")
+            remux_all_from_backup(
+                backup_dir, disc_staging, settings,
+                on_progress=_log_progress,
+            )
+            typer.echo("")
+            if not external:
+                cleanup_backup(disc_staging)
             disc_dirs.append(disc_staging)
 
-        typer.echo("")
         organize_multi_disc(disc_dirs, name, settings, merge=not no_merge)
 
         if settings.auto_eject:
@@ -148,27 +264,70 @@ def multi(
 
 @app.command()
 def tv(
-    show: str = typer.Argument(..., help="TV show name, e.g. 'Seinfeld'"),
+    show: str = typer.Argument(
+        ..., help="TV show name, e.g. 'Seinfeld'"
+    ),
     season: int = typer.Argument(..., help="Season number"),
+    backup: Path | None = typer.Option(
+        None,
+        "--backup",
+        "-b",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="Path to existing BDMV backup (skips backup step).",
+    ),
 ) -> None:
     """Rip a TV disc and organize episodes."""
     settings = _get_settings()
     staging = settings.staging_dir / f"{show}-S{season:02d}"
 
     from ripper.core.organizer import find_mkv_files, organize_tv
-    from ripper.core.ripper import rip_all_titles
+    from ripper.core.ripper import backup_disc, remux_all_from_backup
+    from ripper.core.scanner import compute_hash_from_backup, scan_disc
+    from ripper.metadata.classifier import classify_titles
+    from ripper.tui.flows import cleanup_backup
     from ripper.utils.drive import eject_disc
 
+    external = backup is not None
+
     try:
-        typer.echo(f"Ripping: {show} Season {season}")
-        rip_all_titles(staging, settings, on_progress=_log_progress)
+        typer.echo("Scanning disc...")
+        disc_info = scan_disc(settings)
+        classify_titles(disc_info.titles, settings.min_main_length)
+
+        if external:
+            backup_dir = backup
+        else:
+            typer.echo("Backing up disc...")
+            backup_dir = staging / ".backup"
+            backup_disc(
+                backup_dir, settings, on_progress=_log_progress
+            )
+            typer.echo("")
+
+        content_hash = compute_hash_from_backup(backup_dir)
+        if content_hash:
+            disc_info.content_hash = content_hash
+
+        typer.echo(f"Remuxing: {show} Season {season}")
+        remux_all_from_backup(
+            backup_dir, staging, settings,
+            on_progress=_log_progress,
+        )
         typer.echo("")
 
         # Auto-map by size (largest first)
         mkvs = find_mkv_files(staging)
         episode_map = {mkv: i + 1 for i, mkv in enumerate(mkvs)}
 
-        season_dir = organize_tv(staging, show, season, episode_map, settings)
+        season_dir = organize_tv(
+            staging, show, season, episode_map, settings
+        )
+        if not external:
+            cleanup_backup(staging)
+
         if settings.auto_eject:
             eject_disc(settings.device)
         typer.echo(f"Done: {season_dir}")
@@ -326,9 +485,9 @@ def debug_progress(
 
     if final_progress:
         title_name = str(final_progress.get("title_name", ""))
-        percent = float(final_progress.get("percent", 0.0))
-        current = int(final_progress.get("current_bytes", 0))
-        total = int(final_progress.get("total_bytes", 0))
+        percent = float(str(final_progress.get("percent", 0.0)))
+        current = int(str(final_progress.get("current_bytes", 0)))
+        total = int(str(final_progress.get("total_bytes", 0)))
         typer.echo(
             "Final progress: "
             f"{percent:.1f}% "

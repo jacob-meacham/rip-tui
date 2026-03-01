@@ -202,6 +202,87 @@ def rip_all_titles(
     return ripped
 
 
+def backup_disc(
+    output_dir: Path,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+) -> Path:
+    """Backup entire disc to a decrypted BDMV structure.
+
+    Returns the output directory containing the BDMV tree.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source = f"disc:{settings.device}"
+    cmd = [
+        "makemkvcon",
+        "backup",
+        "--decrypt",
+        source,
+        str(output_dir),
+        "--progress=-same",
+    ]
+
+    logger.info("Backing up disc to %s", output_dir)
+    _run_makemkv(cmd, on_progress)
+    return output_dir
+
+
+def remux_all_from_backup(
+    backup_dir: Path,
+    output_dir: Path,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+) -> list[Path]:
+    """Remux all titles from a backup to MKV files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source = f"file:{backup_dir}"
+    cmd = [
+        "makemkvcon",
+        "mkv",
+        source,
+        "all",
+        str(output_dir),
+        f"--minlength={settings.min_extra_length}",
+        "--progress=-same",
+    ]
+
+    logger.info("Remuxing all titles from backup to %s", output_dir)
+    _run_makemkv(cmd, on_progress)
+
+    ripped = sorted(output_dir.glob("*.mkv"))
+    logger.info("Remux complete: %d file(s)", len(ripped))
+    return ripped
+
+
+def remux_titles_from_backup(
+    backup_dir: Path,
+    titles: list[Title],
+    output_dir: Path,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+) -> list[Path]:
+    """Remux specific titles from a backup to MKV files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source = f"file:{backup_dir}"
+    for title in titles:
+        cmd = [
+            "makemkvcon",
+            "mkv",
+            source,
+            str(title.id),
+            str(output_dir),
+            "--progress=-same",
+        ]
+        _run_makemkv(cmd, on_progress, current_title=title)
+
+    ripped = sorted(output_dir.glob("*.mkv"))
+    logger.info("Remux complete: %d file(s)", len(ripped))
+    return ripped
+
+
 def _rip_single_title(
     title: Title,
     output_dir: Path,

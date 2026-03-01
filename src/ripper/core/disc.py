@@ -26,6 +26,17 @@ class ExtraType(Enum):
 
 
 @dataclass
+class DiscDbTitleInfo:
+    """Per-title data from TheDiscDB."""
+
+    source_file: str  # e.g. "00001.mpls"
+    item_title: str  # Curated content name
+    item_type: str  # "MainMovie" | "Episode" | "Extra" | "Trailer" | "DeletedScene"
+    season: int | None = None
+    episode: int | None = None
+
+
+@dataclass
 class Title:
     """A single title on a disc."""
 
@@ -34,9 +45,11 @@ class Title:
     duration_seconds: int
     size_bytes: int
     chapter_count: int
+    source_file: str = ""  # e.g. "00249.mpls"
     is_main_feature: bool = False
     suggested_extra_type: ExtraType | None = None
     matched_episode: tuple[int, int] | None = None  # (season, episode)
+    discdb_info: DiscDbTitleInfo | None = None
 
     @property
     def duration_display(self) -> str:
@@ -60,6 +73,10 @@ class DiscInfo:
     tmdb_id: int | None = None
     tmdb_title: str | None = None
     year: int | None = None
+    content_hash: str | None = None
+    discdb_title: str | None = None
+    discdb_year: int | None = None
+    discdb_media_type: MediaType = MediaType.UNKNOWN
 
     @property
     def main_titles(self) -> list[Title]:

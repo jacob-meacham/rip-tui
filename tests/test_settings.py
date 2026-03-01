@@ -48,6 +48,31 @@ theme = "light"
     assert settings.theme == "light"
 
 
+def test_discdb_enabled_defaults_to_true(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    monkeypatch.setattr(Settings, "CONFIG_PATH", config)
+
+    settings = Settings()
+
+    assert settings.discdb_enabled is True
+
+
+def test_discdb_enabled_from_toml(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[metadata]
+discdb_enabled = false
+""".strip()
+    )
+    monkeypatch.setattr(Settings, "CONFIG_PATH", config)
+
+    settings = Settings()
+
+    assert settings.discdb_enabled is False
+
+
 def test_environment_overrides_toml(tmp_path, monkeypatch):
     config = tmp_path / "config.toml"
     config.write_text(

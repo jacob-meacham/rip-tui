@@ -1,6 +1,11 @@
 """Tests for formatting utilities."""
 
-from ripper.utils.formatting import fmt_duration, fmt_rate, fmt_size
+from ripper.utils.formatting import (
+    fmt_duration,
+    fmt_rate,
+    fmt_size,
+    sanitize_filename,
+)
 
 
 class TestFmtDuration:
@@ -43,3 +48,41 @@ class TestFmtRate:
 
     def test_bytes_per_second(self):
         assert fmt_rate(512) == "512 B/s"
+
+
+class TestSanitizeFilename:
+    def test_replaces_colon(self):
+        assert sanitize_filename(
+            "Spider-Man: Into the Spider-Verse"
+        ) == "Spider-Man - Into the Spider-Verse"
+
+    def test_replaces_multiple_unsafe_chars(self):
+        assert sanitize_filename('A\\B/C:D*E?F"G<H>I|J') == (
+            "A-B-C-D-E-F-G-H-I-J"
+        )
+
+    def test_collapses_multiple_hyphens(self):
+        assert sanitize_filename("A::B") == "A-B"
+
+    def test_strips_leading_trailing_hyphens(self):
+        assert sanitize_filename(":title:") == "title"
+
+    def test_preserves_parentheses_and_year(self):
+        assert sanitize_filename("Dune (2021)") == "Dune (2021)"
+
+    def test_preserves_safe_characters(self):
+        assert sanitize_filename("The Movie - Part 1") == (
+            "The Movie - Part 1"
+        )
+
+    def test_empty_string(self):
+        assert sanitize_filename("") == ""
+
+    def test_real_world_title_with_colon(self):
+        result = sanitize_filename(
+            "Spider-Man: Into the Spider-Verse (2018)"
+        )
+        assert ":" not in result
+        assert result == (
+            "Spider-Man - Into the Spider-Verse (2018)"
+        )

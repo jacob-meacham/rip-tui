@@ -2,6 +2,7 @@
 tmdb_api_key = ""  # or set RIPPER_TMDB_API_KEY env var
 auto_lookup = true
 fuzzy_threshold = 75
+discdb_enabled = true
 
 [paths]
 staging_dir = "/mnt/media/Rips-Staging"

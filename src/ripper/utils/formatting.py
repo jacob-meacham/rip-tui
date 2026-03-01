@@ -1,5 +1,18 @@
 """Duration and size formatting utilities."""
 
+import re
+
+_SMB_UNSAFE_RE = re.compile(r'[\\/:*?"<>|]')
+
+
+def sanitize_filename(name: str) -> str:
+    """Replace characters unsafe for SMB/Windows paths with hyphens."""
+    # Common in movie titles: "Title: Subtitle" → "Title - Subtitle"
+    sanitized = name.replace(": ", " - ")
+    sanitized = _SMB_UNSAFE_RE.sub("-", sanitized)
+    sanitized = re.sub(r"-{2,}", "-", sanitized)
+    return sanitized.strip(" -")
+
 
 def fmt_duration(seconds: int) -> str:
     """Format seconds as 'Xh XXm XXs'."""

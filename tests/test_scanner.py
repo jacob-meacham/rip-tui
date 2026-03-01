@@ -2,6 +2,7 @@
 
 from ripper.config.settings import Settings
 from ripper.core.scanner import (
+    _compute_content_hash,
     _parse_duration,
     _parse_makemkv_output,
     _parse_raw_byte_count,
@@ -28,6 +29,12 @@ class TestParseRawByteCount:
 
     def test_with_units(self):
         assert _parse_raw_byte_count("1234 bytes") == 1234
+
+    def test_formatted_gb(self):
+        assert _parse_raw_byte_count("32.1 GB") == int(32.1 * 1_073_741_824)
+
+    def test_formatted_mb(self):
+        assert _parse_raw_byte_count("500 MB") == 500 * 1_048_576
 
     def test_empty(self):
         assert _parse_raw_byte_count("") == 0
@@ -117,3 +124,48 @@ TINFO:3,11,0,"1048576"
         disc = _parse_makemkv_output(self.SAMPLE_OUTPUT, settings)
         assert disc.titles[0].chapter_count == 18
         assert disc.titles[1].chapter_count == 8
+
+    def test_no_hsh_lines_gives_no_content_hash(self, tmp_path):
+        settings = self._settings(tmp_path)
+        disc = _parse_makemkv_output(self.SAMPLE_OUTPUT, settings)
+        assert disc.content_hash is None
+
+
+class TestHshParsing:
+    """Test HSH line parsing and content hash computation."""
+
+    SAMPLE_WITH_HSH = """\
+CINFO:2,0,"DUNE_PART_TWO"
+HSH:0,00001.m2ts,2024-01-01 00:00:00,34474836992
+HSH:1,00002.m2ts,2024-01-01 00:00:00,4513218560
+HSH:2,00003.m2ts,2024-01-01 00:00:00,322122752
+TINFO:0,2,0,"Dune Part Two"
+TINFO:0,8,0,"18"
+TINFO:0,9,0,"2:46:06"
+TINFO:0,10,0,"34474836992"
+"""
+
+    def _settings(self, tmp_path) -> Settings:
+        return Settings(
+            staging_dir=tmp_path / "staging",
+            movies_dir=tmp_path / "movies",
+            tv_dir=tmp_path / "tv",
+            device="/dev/null",
+            tmdb_api_key="",
+            min_main_length=3600,
+            min_extra_length=30,
+        )
+
+    def test_content_hash_computed(self, tmp_path):
+        settings = self._settings(tmp_path)
+        disc = _parse_makemkv_output(self.SAMPLE_WITH_HSH, settings)
+        assert disc.content_hash is not None
+        assert len(disc.content_hash) == 32
+
+    def test_content_hash_matches_manual(self, tmp_path):
+        settings = self._settings(tmp_path)
+        disc = _parse_makemkv_output(self.SAMPLE_WITH_HSH, settings)
+        expected = _compute_content_hash(
+            [34474836992, 4513218560, 322122752]
+        )
+        assert disc.content_hash == expected

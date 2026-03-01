@@ -138,6 +138,8 @@ def organize_movie(
     movie_name: str,
     settings: Settings,
     extras_map: dict[Path, ExtraType] | None = None,
+    main_mkv: Path | None = None,
+    names_map: dict[Path, str] | None = None,
 ) -> Path:
     """Organize ripped files into Emby movie folder structure.
 
@@ -147,6 +149,9 @@ def organize_movie(
         settings: Application settings.
         extras_map: Optional mapping of file paths to extra types.
             Files not in this map and not the main feature go to 'extras/'.
+        main_mkv: Explicit main feature file. Falls back to largest.
+        names_map: Optional mapping of file paths to display names
+            (e.g. from DiscDB). Used to rename extras.
 
     Returns:
         Path to the organized movie directory.
@@ -158,23 +163,29 @@ def organize_movie(
     if not mkvs:
         raise FileNotFoundError(f"No MKV files found in {staging_dir}")
 
-    # Largest file is the main feature
-    main_mkv = mkvs[0]
+    # Use specified main feature or fall back to largest
+    if main_mkv is None:
+        main_mkv = mkvs[0]
     main_dest = dest / f"{movie_name}.mkv"
     logger.info("Main feature: %s -> %s", main_mkv.name, main_dest.name)
     shutil.move(str(main_mkv), str(main_dest))
 
     # Organize extras
-    extras = mkvs[1:]
+    extras = [m for m in mkvs if m != main_mkv]
     if extras_map is None:
         extras_map = {}
+    if names_map is None:
+        names_map = {}
 
     for extra in extras:
         extra_type = extras_map.get(extra) or classify_extra(extra.stem)
         extra_dir = dest / extra_type.value
         extra_dir.mkdir(exist_ok=True)
-        logger.info("  -> %s/%s", extra_type.value, extra.name)
-        shutil.move(str(extra), str(extra_dir / extra.name))
+        # Use DiscDB name if available, otherwise keep original
+        display_name = names_map.get(extra)
+        dest_name = f"{display_name}.mkv" if display_name else extra.name
+        logger.info("  -> %s/%s", extra_type.value, dest_name)
+        shutil.move(str(extra), str(extra_dir / dest_name))
 
     # Clean up empty staging dir
     _remove_if_empty(staging_dir)
