@@ -3,8 +3,10 @@
 import asyncio
 import inspect
 import logging
+import shutil
 import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -14,6 +16,7 @@ from simple_term_menu import TerminalMenu
 
 from ripper.config.settings import Settings
 from ripper.core.disc import DiscInfo, MediaType
+from ripper.core.organizer import organize_movie, organize_tv
 from ripper.core.ripper import RipCancelledError
 from ripper.core.scanner import scan_disc
 from ripper.metadata.classifier import (
@@ -21,9 +24,15 @@ from ripper.metadata.classifier import (
     detect_media_type,
 )
 from ripper.metadata.matcher import clean_disc_name
-from ripper.tui.display import print_title_table, title_display_name
+from ripper.tui.display import (
+    ConcurrentProgress,
+    print_title_table,
+    title_display_name,
+)
 from ripper.tui.flows import (
+    RemuxHandle,
     backup_is_valid,
+    classify_and_organize_movie,
     cleanup_backup,
     create_backup,
     enrich_disc_info,
@@ -32,7 +41,10 @@ from ripper.tui.flows import (
     rip_multi_disc,
     rip_selected,
     rip_tv,
+    select_remux_titles,
+    start_remux_background,
 )
+from ripper.utils.drive import eject_disc, wait_for_disc
 from ripper.utils.formatting import fmt_duration, fmt_size, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -700,3 +712,394 @@ def _flow_select(
     except Exception as e:
         console.print(f"\n  [red]Error: {e}[/]")
         logger.error("Rip failed: %s", e, exc_info=True)
+
+
+# ── Batch Mode ────────────────────────────────────────────────────
+
+
+@dataclass
+class _PendingDisc:
+    """Tracks a disc whose remux is running in the background."""
+
+    remux: RemuxHandle
+    disc_info: DiscInfo
+    name: str
+    mode: str  # "full", "main", "tv", "select"
+    backup_dir: Path
+    # TV-specific
+    show: str | None = None
+    season: int | None = None
+    # Select-specific
+    selected_ids: set[int] | None = None
+
+
+def _finish_pending_disc(
+    settings: Settings, pending: _PendingDisc,
+) -> None:
+    """Complete post-remux work for a disc that was remuxed in background."""
+    pending.remux.result_or_raise()
+
+    if pending.mode == "full":
+        classify_and_organize_movie(
+            settings, pending.disc_info,
+            pending.name, pending.remux.staging,
+        )
+    elif pending.mode == "main":
+        console.print("  Organizing files...")
+        organize_movie(
+            pending.remux.staging, pending.name, settings,
+        )
+    elif pending.mode == "tv" and pending.show and pending.season:
+        from ripper.core.organizer import find_mkv_files
+        from ripper.tui.flows import _match_tv_episodes
+
+        mkvs = find_mkv_files(pending.remux.staging)
+        episode_map = _match_tv_episodes(
+            settings, pending.disc_info,
+            pending.show, pending.season, mkvs,
+        )
+        organize_tv(
+            pending.remux.staging, pending.show,
+            pending.season, episode_map, settings,
+        )
+    elif pending.mode == "select":
+        # Selected titles don't need organize — they stay in staging
+        pass
+
+    console.print(
+        f"  [green bold]Done![/] {pending.name}"
+    )
+
+    # Clean up the per-disc backup
+    shutil.rmtree(pending.backup_dir, ignore_errors=True)
+
+
+_INTERRUPT_ITEMS = [
+    "Cancel current disc",
+    "Skip to next disc",
+    "Abort all",
+    "Resume",
+]
+
+
+def _show_interrupt_menu() -> int | None:
+    """Show interrupt menu when Ctrl+C is pressed. Returns index."""
+    console.print()
+    console.print("  [yellow bold]Interrupted — what do you want to do?[/]")
+    console.print()
+
+    menu = _build_terminal_menu(
+        _INTERRUPT_ITEMS,
+        title="  Select an action:",
+        show_menu_entry_index=False,
+        cycle_cursor=True,
+        menu_cursor_style=("fg_yellow", "bold"),
+        menu_highlight_style=("fg_yellow", "bold"),
+    )
+    idx = menu.show()
+    console.print()
+
+    if idx is None:
+        return None
+    if isinstance(idx, tuple):
+        return idx[0]
+    return idx
+
+
+def _prompt_next_disc() -> bool:
+    """Prompt to insert next disc. Returns False if user is done."""
+    console.print()
+    try:
+        raw = input(
+            "  Insert next disc and press Enter"
+            " (or 'done' to finish): "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return False
+    return raw not in ("done", "d", "quit", "q")
+
+
+def run_batch(
+    settings: Settings,
+    verbose: bool = False,
+) -> None:
+    """Batch-rip multiple discs with pipelined backup and remux.
+
+    While disc N is being remuxed from its backup files, disc N+1 can
+    be backed up from the optical drive concurrently.
+    """
+    if not verbose:
+        logging.getLogger().setLevel(logging.WARNING)
+
+    console.print()
+    console.print(
+        "  [bold]Batch mode[/]"
+        " — pipeline backup and remux across discs"
+    )
+    console.print()
+
+    pending: _PendingDisc | None = None
+    disc_num = 0
+
+    try:
+        while True:
+            disc_num += 1
+
+            # Per-disc backup dir for isolation
+            backup_dir_name = f".backup-disc{disc_num}"
+            backup_staging = settings.staging_dir / backup_dir_name
+
+            # If previous backup dir exists, clean it
+            if backup_staging.exists():
+                shutil.rmtree(backup_staging)
+
+            # Scan + backup current disc
+            # May overlap with a pending remux from previous disc
+            disc_info = _scan_disc(settings)
+            if disc_info is None:
+                break
+
+            # Backup — with concurrent progress if remux is active
+            if pending and pending.remux.is_alive():
+                console.print(
+                    "  [dim]Backing up disc while"
+                    " remuxing previous...[/]"
+                )
+                with ConcurrentProgress() as cp:
+                    from ripper.core.ripper import backup_disc as _backup
+
+                    backup_progress = cp.make_callback("backup")
+                    _backup(
+                        backup_staging, settings,
+                        on_progress=backup_progress,
+                        process_id=f"backup-disc{disc_num}",
+                    )
+                backup_dir = backup_staging
+            else:
+                backup_dir = create_backup(settings, backup_staging)
+
+            enrich_disc_info(disc_info, backup_dir, settings)
+
+            # Wait for any pending remux before interactive prompts
+            if pending:
+                if pending.remux.is_alive():
+                    console.print(
+                        "  [dim]Waiting for previous"
+                        " remux to finish...[/]"
+                    )
+                    pending.remux.join()
+                try:
+                    _finish_pending_disc(settings, pending)
+                except Exception as e:
+                    console.print(
+                        f"  [red]Previous disc error: {e}[/]"
+                    )
+                    logger.error(
+                        "Post-remux failed: %s", e, exc_info=True,
+                    )
+                pending = None
+
+            # Kick off TMDb in background
+            tmdb_thread = _start_tmdb_lookup(disc_info, settings)
+
+            # Interactive: show summary, menu, prompts
+            _show_disc_summary(disc_info, verbose=verbose)
+
+            choice = _show_menu()
+            if choice is None:
+                break
+
+            if choice != 5:
+                _await_tmdb(tmdb_thread)
+
+            if choice == 5:
+                _show_disc_info(disc_info)
+                continue
+
+            # Determine mode and gather params
+            mode: str | None = None
+            name: str | None = None
+            show: str | None = None
+            season: int | None = None
+            disc_count: int = 1
+            selected_ids: set[int] | None = None
+
+            if choice == 0:
+                mode = "full"
+                name = _prompt_movie_name(disc_info)
+            elif choice == 1:
+                mode = "main"
+                name = _prompt_movie_name(disc_info)
+            elif choice == 2:
+                # Multi-disc is its own pipeline, not batchable
+                mode = "multi"
+                name = _prompt_movie_name(disc_info)
+                if name:
+                    dc = _prompt_disc_count()
+                    if dc is None:
+                        continue
+                    disc_count = dc
+            elif choice == 3:
+                mode = "tv"
+                suggested_show = None
+                if disc_info.discdb_media_type == MediaType.TV_SHOW:
+                    suggested_show = disc_info.discdb_title
+                result = _prompt_tv_info(
+                    suggested_show=suggested_show,
+                )
+                if result is None:
+                    continue
+                show, season = result
+                name = show
+            elif choice == 4:
+                mode = "select"
+                selected_ids = _select_titles(disc_info)
+                if not selected_ids:
+                    continue
+                name = _suggested_name(disc_info)
+
+            if not name or not mode:
+                continue
+
+            # Confirm
+            if mode == "tv":
+                if not _confirm_rip(
+                    disc_info, name, mode, season_num=season or 1,
+                ):
+                    continue
+            elif mode == "select":
+                if not _confirm_rip(
+                    disc_info, name, mode,
+                    selected_ids=selected_ids,
+                ):
+                    continue
+            else:
+                if not _confirm_rip(
+                    disc_info, name, mode,
+                    disc_count=disc_count,
+                ):
+                    continue
+
+            # Multi-disc runs its own pipeline (not pipelined)
+            if mode == "multi":
+                try:
+                    rip_multi_disc(
+                        settings, disc_info, name,
+                        disc_count, backup_dir,
+                    )
+                except RipCancelledError:
+                    console.print(
+                        "\n  [yellow]Cancelled.[/]"
+                    )
+                except Exception as e:
+                    console.print(f"\n  [red]Error: {e}[/]")
+                    logger.error(
+                        "Rip failed: %s", e, exc_info=True,
+                    )
+                shutil.rmtree(backup_dir, ignore_errors=True)
+
+                if not _prompt_next_disc():
+                    break
+                continue
+
+            # Start remux in background
+            staging = settings.staging_dir / name
+            titles = select_remux_titles(disc_info) if mode == "full" else None
+            if mode == "main":
+                titles = disc_info.main_titles
+            elif mode == "select" and selected_ids:
+                titles = [
+                    t for t in disc_info.titles
+                    if t.id in selected_ids
+                ]
+
+            remux_handle = start_remux_background(
+                backup_dir, staging, name, settings,
+                titles=titles,
+                process_id=f"remux-disc{disc_num}",
+            )
+
+            pending = _PendingDisc(
+                remux=remux_handle,
+                disc_info=disc_info,
+                name=name,
+                mode=mode,
+                backup_dir=backup_dir,
+                show=show,
+                season=season,
+                selected_ids=selected_ids,
+            )
+
+            # Eject and prompt for next disc
+            eject_disc(settings.device)
+
+            if not _prompt_next_disc():
+                # Finish the last disc
+                console.print(
+                    "  [dim]Finishing last disc...[/]"
+                )
+                pending.remux.join()
+                try:
+                    _finish_pending_disc(settings, pending)
+                except Exception as e:
+                    console.print(
+                        f"  [red]Error: {e}[/]"
+                    )
+                    logger.error(
+                        "Post-remux failed: %s", e,
+                        exc_info=True,
+                    )
+                pending = None
+                break
+
+            # Wait for disc to be ready
+            console.print("  [dim]Waiting for disc...[/]")
+            if not wait_for_disc(
+                settings.device, timeout_seconds=120,
+            ):
+                console.print(
+                    "  [red]Timed out waiting for disc[/]"
+                )
+                break
+
+    except KeyboardInterrupt:
+        from ripper.core.ripper import cancel_all_rips, cancel_rip
+
+        action = _show_interrupt_menu()
+        if action == 0:
+            # Cancel current disc
+            console.print("  [yellow]Cancelling current disc...[/]")
+            cancel_rip(f"backup-disc{disc_num}")
+            cancel_rip(f"remux-disc{disc_num}")
+        elif action == 1:
+            # Skip to next disc
+            console.print("  [yellow]Skipping current disc...[/]")
+            cancel_rip(f"backup-disc{disc_num}")
+        elif action == 2:
+            # Abort all
+            console.print("  [yellow]Aborting all...[/]")
+            cancel_all_rips()
+            pending = None
+        elif action == 3:
+            # Resume — continue as if nothing happened
+            console.print("  [dim]Resuming...[/]")
+        else:
+            # Menu escaped — treat as abort
+            cancel_all_rips()
+            pending = None
+    finally:
+        # Clean up any remaining pending disc
+        if pending:
+            if pending.remux.is_alive():
+                console.print(
+                    "  [dim]Waiting for pending remux...[/]"
+                )
+                pending.remux.join()
+            try:
+                _finish_pending_disc(settings, pending)
+            except Exception as e:
+                console.print(f"  [red]Cleanup error: {e}[/]")
+
+    console.print()
+    console.print("  [bold]Batch complete.[/]")

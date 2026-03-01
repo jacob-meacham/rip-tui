@@ -1,10 +1,14 @@
 """Display helpers for progress, extras classification, and title tables."""
 
 import sys
+import threading
 from pathlib import Path
 
 from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from ripper.core.disc import DiscInfo, ExtraType, Title
 from ripper.core.ripper import RipProgress
@@ -76,6 +80,71 @@ def start_rip_with_status(
     rip_fn(*args, **kwargs)
     # Newline after the \r progress line
     console.print()
+
+
+class ConcurrentProgress:
+    """Context manager for displaying multiple progress bars at once.
+
+    Used in batch mode to show backup and remux progress simultaneously.
+    Single-disc mode continues using print_progress() directly.
+    """
+
+    def __init__(self) -> None:
+        self._slots: dict[str, RipProgress] = {}
+        self._lock = threading.Lock()
+        self._live: Live | None = None
+
+    def __enter__(self) -> "ConcurrentProgress":
+        self._live = Live(
+            self._render(), console=console, refresh_per_second=4,
+        )
+        self._live.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._live:
+            self._live.__exit__(*exc)
+            self._live = None
+
+    def update(self, slot_id: str, progress: RipProgress) -> None:
+        """Update progress for a named slot."""
+        with self._lock:
+            self._slots[slot_id] = progress
+        if self._live:
+            self._live.update(self._render())
+
+    def remove(self, slot_id: str) -> None:
+        """Remove a slot when its operation completes."""
+        with self._lock:
+            self._slots.pop(slot_id, None)
+        if self._live:
+            self._live.update(self._render())
+
+    def make_callback(self, slot_id: str):
+        """Return a ProgressCallback bound to a specific slot."""
+        def _cb(progress: RipProgress) -> None:
+            self.update(slot_id, progress)
+        return _cb
+
+    def _render(self) -> Panel:
+        """Build a Rich Panel with one progress bar per active slot."""
+        with self._lock:
+            slots = dict(self._slots)
+
+        if not slots:
+            return Panel(Text("  Waiting...", style="dim"), border_style="cyan")
+
+        lines = Text()
+        for slot_id, progress in slots.items():
+            line = format_progress_line(progress)
+            # Strip leading \r from format_progress_line
+            clean = line.lstrip("\r")
+            label = slot_id.capitalize()
+            lines.append(f"  {label}: ", style="bold")
+            lines.append(clean.strip())
+            lines.append("\n")
+
+        return Panel(lines, title="Progress", border_style="cyan")
 
 
 def classify_extras_interactive(

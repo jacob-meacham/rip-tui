@@ -1,17 +1,21 @@
 """Tests for rip flow pipeline functions."""
 
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from ripper.config.settings import Settings
-from ripper.core.disc import DiscInfo, Title
+from ripper.core.disc import DiscDbTitleInfo, DiscInfo, Title
 from ripper.tui.flows import (
+    RemuxHandle,
     cleanup_backup,
     create_backup,
     enrich_disc_info,
     remux_from_backup,
+    select_remux_titles,
+    start_remux_background,
 )
 
 
@@ -196,3 +200,98 @@ class TestCleanupBackup:
         staging = tmp_path / "staging"
         # No .backup directory exists — should not raise
         cleanup_backup(staging)
+
+
+class TestSelectRemuxTitles:
+    def test_returns_discdb_titles_when_present(self, disc_info):
+        disc_info.titles[0].discdb_info = DiscDbTitleInfo(
+            source_file="00001.mpls",
+            item_title="Main Feature",
+            item_type="MainMovie",
+        )
+        result = select_remux_titles(disc_info)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].id == 0
+
+    def test_returns_none_when_no_discdb(self, disc_info):
+        result = select_remux_titles(disc_info)
+        assert result is None
+
+
+class TestRemuxHandle:
+    def test_join_and_is_alive(self):
+        event = threading.Event()
+
+        def _block():
+            event.wait()
+
+        thread = threading.Thread(target=_block, daemon=True)
+        handle = RemuxHandle(thread=thread, staging=Path("/tmp/test"))
+        thread.start()
+
+        assert handle.is_alive()
+        event.set()
+        handle.join(timeout=5)
+        assert not handle.is_alive()
+
+    def test_result_or_raise_propagates_error(self):
+        handle = RemuxHandle(
+            thread=threading.Thread(target=lambda: None, daemon=True),
+            staging=Path("/tmp/test"),
+        )
+        handle.thread.start()
+        handle.thread.join()
+        handle.error = RuntimeError("test failure")
+
+        with pytest.raises(RuntimeError, match="test failure"):
+            handle.result_or_raise()
+
+    def test_result_or_raise_succeeds_on_no_error(self):
+        handle = RemuxHandle(
+            thread=threading.Thread(target=lambda: None, daemon=True),
+            staging=Path("/tmp/test"),
+        )
+        handle.thread.start()
+        handle.thread.join()
+
+        # Should not raise
+        handle.result_or_raise()
+
+
+class TestStartRemuxBackground:
+    def test_starts_thread_and_returns_handle(self, settings, tmp_path):
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        backup = tmp_path / "backup"
+        backup.mkdir()
+
+        with patch(
+            "ripper.tui.flows.remux_all_from_backup"
+        ) as mock_remux:
+            handle = start_remux_background(
+                backup, staging, "Test", settings,
+            )
+            handle.join(timeout=10)
+
+        assert not handle.is_alive()
+        assert handle.error is None
+        mock_remux.assert_called_once()
+
+    def test_captures_error_on_failure(self, settings, tmp_path):
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        backup = tmp_path / "backup"
+        backup.mkdir()
+
+        with patch(
+            "ripper.tui.flows.remux_all_from_backup",
+            side_effect=RuntimeError("remux boom"),
+        ):
+            handle = start_remux_background(
+                backup, staging, "Test", settings,
+            )
+            handle.join(timeout=10)
+
+        assert handle.error is not None
+        assert "remux boom" in str(handle.error)

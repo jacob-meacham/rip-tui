@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import shutil
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.console import Console
@@ -16,6 +18,7 @@ from ripper.core.organizer import (
     organize_tv,
 )
 from ripper.core.ripper import (
+    ProgressCallback,
     backup_disc,
     remux_all_from_backup,
     remux_titles_from_backup,
@@ -148,6 +151,67 @@ def cleanup_backup(staging_dir: Path) -> None:
     shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+# ── Background Remux ──────────────────────────────────────────────
+
+
+@dataclass
+class RemuxHandle:
+    """Handle for a background remux thread."""
+
+    thread: threading.Thread
+    staging: Path
+    error: Exception | None = field(default=None, init=False)
+
+    def join(self, timeout: float | None = None) -> None:
+        self.thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return self.thread.is_alive()
+
+    def result_or_raise(self) -> None:
+        """Wait for thread, then re-raise any captured error."""
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+
+
+def start_remux_background(
+    backup_dir: Path,
+    staging: Path,
+    label: str,
+    settings: Settings,
+    titles: list[Title] | None = None,
+    on_progress: ProgressCallback | None = None,
+    process_id: str | None = None,
+) -> RemuxHandle:
+    """Start a remux operation in a background thread.
+
+    Returns a RemuxHandle that can be joined or checked for completion.
+    """
+    handle = RemuxHandle(thread=threading.Thread(daemon=True), staging=staging)
+
+    def _run() -> None:
+        try:
+            if titles is not None:
+                remux_titles_from_backup(
+                    backup_dir, titles, staging, settings,
+                    on_progress=on_progress, process_id=process_id,
+                )
+            else:
+                remux_all_from_backup(
+                    backup_dir, staging, settings,
+                    on_progress=on_progress, process_id=process_id,
+                )
+        except Exception as exc:
+            handle.error = exc
+            logger.error("Background remux failed: %s", exc)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    handle.thread = thread
+    thread.start()
+    return handle
+
+
 def _sync_discdb_lookup(content_hash: str) -> dict | None:
     """Synchronous DiscDB lookup."""
     from ripper.metadata.discdb import DiscDbClient
@@ -181,30 +245,30 @@ def _match_mkvs_to_titles(
     return result
 
 
-def rip_movie_full(
+def select_remux_titles(disc_info: DiscInfo) -> list[Title] | None:
+    """Return DiscDB-known titles, or None to remux all."""
+    discdb_titles = [t for t in disc_info.titles if t.discdb_info]
+    return discdb_titles if discdb_titles else None
+
+
+def classify_and_organize_movie(
     settings: Settings,
     disc_info: DiscInfo,
     name: str,
-    backup_dir: Path,
+    staging: Path,
 ) -> None:
-    """Rip movie with all extras."""
-    staging = settings.staging_dir / name
+    """MKV finding, title matching, extras classification, and organize.
 
-    # When DiscDB data exists, remux only known titles
-    discdb_titles = [t for t in disc_info.titles if t.discdb_info]
-    if discdb_titles:
-        remux_from_backup(
-            backup_dir, staging, name, settings, titles=discdb_titles,
-        )
-    else:
-        remux_from_backup(backup_dir, staging, name, settings)
-
+    This is the interactive post-remux step for movie-with-extras.
+    Extracted so batch mode can call it after a background remux finishes.
+    """
     mkvs = find_mkv_files(staging)
 
     main_mkv = None
     extras_map: dict[Path, ExtraType] = {}
     names_map: dict[Path, str] = {}
 
+    discdb_titles = [t for t in disc_info.titles if t.discdb_info]
     if discdb_titles:
         mkv_map = _match_mkvs_to_titles(mkvs, disc_info.titles)
         for mkv, title in mkv_map.items():
@@ -242,6 +306,23 @@ def rip_movie_full(
         main_mkv=main_mkv,
         names_map=names_map,
     )
+
+
+def rip_movie_full(
+    settings: Settings,
+    disc_info: DiscInfo,
+    name: str,
+    backup_dir: Path,
+) -> None:
+    """Rip movie with all extras."""
+    staging = settings.staging_dir / name
+
+    titles = select_remux_titles(disc_info)
+    remux_from_backup(
+        backup_dir, staging, name, settings, titles=titles,
+    )
+
+    classify_and_organize_movie(settings, disc_info, name, staging)
 
     if settings.auto_eject:
         eject_disc(settings.device)

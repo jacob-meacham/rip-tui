@@ -1,12 +1,20 @@
-"""Tests for ripper progress parsing."""
+"""Tests for ripper progress parsing and process registry."""
+
+import subprocess
+import threading
+from unittest.mock import MagicMock
 
 from ripper.core.disc import Title
 from ripper.core.ripper import (
     HUMAN_PROGRESS_RE,
     PROGRESS_RE,
+    _active_processes,
     _parse_human_progress_values,
     _parse_progress_values,
+    _process_lock,
     _ProgressParser,
+    cancel_all_rips,
+    cancel_rip,
 )
 
 
@@ -139,3 +147,83 @@ class TestProgressParser:
         assert r2 is not None
         # Rate should be positive (200 - 100 bytes over some time)
         assert r2[0].bytes_per_second is None or r2[0].bytes_per_second >= 0
+
+
+class TestProcessRegistry:
+    """Tests for the dict-based process registry."""
+
+    def _make_mock_proc(self, alive: bool = True) -> MagicMock:
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None if alive else 0
+        proc.wait.return_value = 0
+        return proc
+
+    def test_cancel_rip_terminates_specific_process(self):
+        proc = self._make_mock_proc()
+        with _process_lock:
+            _active_processes["test-1"] = proc
+        try:
+            cancel_rip("test-1")
+            proc.terminate.assert_called_once()
+        finally:
+            with _process_lock:
+                _active_processes.pop("test-1", None)
+
+    def test_cancel_rip_ignores_unknown_id(self):
+        # Should not raise
+        cancel_rip("nonexistent")
+
+    def test_cancel_rip_ignores_already_exited(self):
+        proc = self._make_mock_proc(alive=False)
+        with _process_lock:
+            _active_processes["done-1"] = proc
+        try:
+            cancel_rip("done-1")
+            proc.terminate.assert_not_called()
+        finally:
+            with _process_lock:
+                _active_processes.pop("done-1", None)
+
+    def test_cancel_all_rips_terminates_all(self):
+        proc_a = self._make_mock_proc()
+        proc_b = self._make_mock_proc()
+        with _process_lock:
+            _active_processes["a"] = proc_a
+            _active_processes["b"] = proc_b
+        try:
+            cancel_all_rips()
+            proc_a.terminate.assert_called_once()
+            proc_b.terminate.assert_called_once()
+        finally:
+            with _process_lock:
+                _active_processes.pop("a", None)
+                _active_processes.pop("b", None)
+
+    def test_concurrent_registration(self):
+        """Verify multiple threads can register processes safely."""
+        procs = [self._make_mock_proc() for _ in range(5)]
+        errors: list[Exception] = []
+
+        def register(idx: int) -> None:
+            try:
+                pid = f"concurrent-{idx}"
+                with _process_lock:
+                    _active_processes[pid] = procs[idx]
+                with _process_lock:
+                    _active_processes.pop(pid, None)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=register, args=(i,))
+            for i in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert not errors
+        # All should be cleaned up
+        for i in range(5):
+            assert f"concurrent-{i}" not in _active_processes

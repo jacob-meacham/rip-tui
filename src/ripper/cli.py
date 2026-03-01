@@ -377,6 +377,24 @@ def debug_progress(
 
 
 @app.command()
+def batch(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output.",
+    ),
+) -> None:
+    """Batch-rip multiple discs with pipelined backup and remux."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+
+    from ripper.tui.app import run_batch
+
+    settings = _get_settings()
+    run_batch(settings, verbose=verbose)
+
+
+@app.command()
 def eject() -> None:
     """Eject the disc."""
     settings = _get_settings()

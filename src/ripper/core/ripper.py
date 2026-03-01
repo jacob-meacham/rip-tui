@@ -61,9 +61,10 @@ class RipCancelledError(Exception):
     """Raised when a rip is cancelled by the user."""
 
 
-# Global reference to the active makemkvcon process for cancellation
-_active_process: subprocess.Popen | None = None
+# Registry of active makemkvcon processes for cancellation
+_active_processes: dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
+_process_counter = 0
 
 
 class _ProgressDebugHarness:
@@ -138,16 +139,42 @@ class _ProgressDebugHarness:
             pass
 
 
-def cancel_active_rip() -> None:
-    """Kill the currently running makemkvcon process, if any."""
+def _next_process_id() -> str:
+    """Generate a unique default process ID."""
+    global _process_counter
+    _process_counter += 1
+    return f"proc-{_process_counter}"
+
+
+def cancel_rip(process_id: str) -> None:
+    """Kill a specific makemkvcon process by ID."""
     with _process_lock:
-        if _active_process and _active_process.poll() is None:
-            logger.info("Cancelling active rip...")
-            _active_process.terminate()
+        proc = _active_processes.get(process_id)
+        if proc and proc.poll() is None:
+            logger.info("Cancelling rip %s...", process_id)
+            proc.terminate()
             try:
-                _active_process.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                _active_process.kill()
+                proc.kill()
+
+
+def cancel_all_rips() -> None:
+    """Kill all tracked makemkvcon processes."""
+    with _process_lock:
+        for pid, proc in list(_active_processes.items()):
+            if proc.poll() is None:
+                logger.info("Cancelling rip %s...", pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+
+def cancel_active_rip() -> None:
+    """Kill all running makemkvcon processes (backward compat)."""
+    cancel_all_rips()
 
 
 def rip_titles(
@@ -206,6 +233,7 @@ def backup_disc(
     output_dir: Path,
     settings: Settings,
     on_progress: ProgressCallback | None = None,
+    process_id: str | None = None,
 ) -> Path:
     """Backup entire disc to a decrypted BDMV structure.
 
@@ -224,7 +252,7 @@ def backup_disc(
     ]
 
     logger.info("Backing up disc to %s", output_dir)
-    _run_makemkv(cmd, on_progress)
+    _run_makemkv(cmd, on_progress, process_id=process_id)
     return output_dir
 
 
@@ -233,6 +261,7 @@ def remux_all_from_backup(
     output_dir: Path,
     settings: Settings,
     on_progress: ProgressCallback | None = None,
+    process_id: str | None = None,
 ) -> list[Path]:
     """Remux all titles from a backup to MKV files."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -249,7 +278,7 @@ def remux_all_from_backup(
     ]
 
     logger.info("Remuxing all titles from backup to %s", output_dir)
-    _run_makemkv(cmd, on_progress)
+    _run_makemkv(cmd, on_progress, process_id=process_id)
 
     ripped = sorted(output_dir.glob("*.mkv"))
     logger.info("Remux complete: %d file(s)", len(ripped))
@@ -262,6 +291,7 @@ def remux_titles_from_backup(
     output_dir: Path,
     settings: Settings,
     on_progress: ProgressCallback | None = None,
+    process_id: str | None = None,
 ) -> list[Path]:
     """Remux specific titles from a backup to MKV files."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -276,7 +306,10 @@ def remux_titles_from_backup(
             str(output_dir),
             "--progress=-same",
         ]
-        _run_makemkv(cmd, on_progress, current_title=title)
+        _run_makemkv(
+            cmd, on_progress,
+            current_title=title, process_id=process_id,
+        )
 
     ripped = sorted(output_dir.glob("*.mkv"))
     logger.info("Remux complete: %d file(s)", len(ripped))
@@ -508,16 +541,21 @@ def _run_makemkv(
     cmd: list[str],
     on_progress: ProgressCallback | None,
     current_title: Title | None = None,
+    process_id: str | None = None,
 ) -> None:
     """Execute makemkvcon and parse progress output.
 
     Uses a pseudo-TTY for stdout so makemkvcon line-buffers its
     progress output instead of block-buffering to a pipe.
-    """
-    global _active_process
 
+    Args:
+        process_id: Optional ID for the process registry. If None, a
+            unique ID is generated automatically.
+    """
     if not shutil.which("makemkvcon"):
         raise MakeMKVNotFoundError()
+
+    pid = process_id or _next_process_id()
 
     debug_harness = _ProgressDebugHarness.from_environment(
         cmd, current_title
@@ -537,7 +575,7 @@ def _run_makemkv(
         debug_harness.record("process_start", pid=process.pid)
 
     with _process_lock:
-        _active_process = process
+        _active_processes[pid] = process
 
     parser = _ProgressParser(current_title, debug_harness)
 
@@ -588,7 +626,7 @@ def _run_makemkv(
     finally:
         master_file.close()
         with _process_lock:
-            _active_process = None
+            _active_processes.pop(pid, None)
         if debug_harness:
             if error_message:
                 debug_harness.record(
