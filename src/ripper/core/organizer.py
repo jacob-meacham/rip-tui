@@ -10,6 +10,7 @@ from pathlib import Path
 from ripper.config.settings import Settings
 from ripper.core.disc import ExtraType
 from ripper.metadata.classifier import classify_extra
+from ripper.utils.formatting import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,11 @@ def organize_movie(
         extra_dir.mkdir(exist_ok=True)
         # Use DiscDB name if available, otherwise keep original
         display_name = names_map.get(extra)
-        dest_name = f"{display_name}.mkv" if display_name else extra.name
+        dest_name = (
+            f"{sanitize_filename(display_name)}.mkv"
+            if display_name
+            else sanitize_filename(extra.stem) + extra.suffix
+        )
         logger.info("  -> %s/%s", extra_type.value, dest_name)
         shutil.move(str(extra), str(extra_dir / dest_name))
 
@@ -279,7 +284,8 @@ def organize_multi_disc(
         extra_type = extras_map.get(extra) or classify_extra(extra.stem)
         extra_dir = dest / extra_type.value
         extra_dir.mkdir(exist_ok=True)
-        shutil.move(str(extra), str(extra_dir / extra.name))
+        dest_name = sanitize_filename(extra.stem) + extra.suffix
+        shutil.move(str(extra), str(extra_dir / dest_name))
 
     # Clean up disc staging dirs
     for disc_dir in disc_dirs:

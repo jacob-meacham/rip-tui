@@ -115,6 +115,37 @@ class TestOrganizeMovie:
         # Staging dir should be removed if empty
         assert not staging.exists()
 
+    def test_extras_names_sanitized_for_smb(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        staging = settings.staging_dir / "Test Movie (2024)"
+        _create_mkv(staging / "title00.mkv", 10000)
+        _create_mkv(staging / 'Interview: The Director.mkv', 3000)
+
+        organize_movie(staging, "Test Movie (2024)", settings)
+
+        movie_dir = settings.movies_dir / "Test Movie (2024)"
+        assert (
+            movie_dir / "interviews" / "Interview - The Director.mkv"
+        ).exists()
+
+    def test_extras_discdb_names_sanitized_for_smb(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        staging = settings.staging_dir / "Test Movie (2024)"
+        _create_mkv(staging / "title00.mkv", 10000)
+        extra = _create_mkv(staging / "title01.mkv", 3000)
+
+        extras_map = {extra: ExtraType.FEATURETTES}
+        names_map = {extra: 'Making Of: "The Movie"'}
+        organize_movie(
+            staging, "Test Movie (2024)", settings,
+            extras_map=extras_map, names_map=names_map,
+        )
+
+        movie_dir = settings.movies_dir / "Test Movie (2024)"
+        assert (
+            movie_dir / "featurettes" / "Making Of - -The Movie.mkv"
+        ).exists()
+
     def test_nested_and_uppercase_mkvs_are_moved(self, tmp_path):
         settings = _make_settings(tmp_path)
         staging = settings.staging_dir / "Test Movie (2024)"
