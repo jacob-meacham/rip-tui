@@ -1,8 +1,14 @@
 """Display helpers for progress, extras classification, and title tables."""
 
+from __future__ import annotations
+
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ripper.notifications import NotificationDispatcher
 
 from rich.console import Console
 from rich.live import Live
@@ -150,9 +156,18 @@ class ConcurrentProgress:
 def classify_extras_interactive(
     extras: list[Path],
     disc_info: DiscInfo | None = None,
+    dispatcher: "NotificationDispatcher | None" = None,
 ) -> dict[Path, ExtraType]:
     """Interactive extras classification using a selection menu."""
+    from ripper.notifications import EventType, NotificationEvent
+
     classifications: dict[Path, ExtraType] = {}
+
+    if dispatcher and dispatcher.enabled:
+        dispatcher.notify(NotificationEvent(
+            event_type=EventType.ACTION_NEEDED,
+            message="Classify extras",
+        ))
 
     console.print()
     console.print("  [bold]Classify extras for Emby:[/]")

@@ -87,3 +87,51 @@ path = "/dev/sr0"
     settings = Settings()
 
     assert settings.device == "/dev/sr9"
+
+
+def test_notification_defaults(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    monkeypatch.setattr(Settings, "CONFIG_PATH", config)
+
+    settings = Settings()
+
+    assert settings.notify_terminal is True
+    assert settings.notify_slack_webhook_url == ""
+
+
+def test_notification_settings_from_toml(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[notifications]
+notify_terminal = false
+notify_slack_webhook_url = "https://hooks.slack.com/test"
+""".strip()
+    )
+    monkeypatch.setattr(Settings, "CONFIG_PATH", config)
+
+    settings = Settings()
+
+    assert settings.notify_terminal is False
+    assert settings.notify_slack_webhook_url == (
+        "https://hooks.slack.com/test"
+    )
+
+
+def test_notification_env_var_overrides(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    monkeypatch.setattr(Settings, "CONFIG_PATH", config)
+    monkeypatch.setenv("RIPPER_NOTIFY_TERMINAL", "false")
+    monkeypatch.setenv(
+        "RIPPER_NOTIFY_SLACK_WEBHOOK_URL",
+        "https://hooks.slack.com/env",
+    )
+
+    settings = Settings()
+
+    assert settings.notify_terminal is False
+    assert settings.notify_slack_webhook_url == (
+        "https://hooks.slack.com/env"
+    )

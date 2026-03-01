@@ -1,5 +1,7 @@
 """Inline interactive CLI for ripping discs."""
 
+from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
@@ -8,6 +10,10 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ripper.notifications import NotificationDispatcher
 
 from rich.console import Console
 from rich.panel import Panel
@@ -143,11 +149,27 @@ def run_interactive(
 
     enrich_disc_info(disc_info, backup_dir, settings)
 
+    # Notification dispatcher
+    from ripper.notifications import (
+        EventType,
+        NotificationEvent,
+        create_dispatcher,
+    )
+
+    dispatcher = create_dispatcher(settings)
+
     # Show enriched disc summary
     _show_disc_summary(disc_info, verbose=verbose)
 
     # Menu loop — flows return here on cancel/back.
     while True:
+        if dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.ACTION_NEEDED,
+                message="Ready — choose a rip mode",
+                disc_name=disc_info.name,
+            ))
+
         choice = _show_menu()
         if choice is None:
             break
@@ -160,25 +182,32 @@ def run_interactive(
             _flow_movie(
                 settings, disc_info, mode="full",
                 backup_dir=backup_dir,
+                dispatcher=dispatcher,
             )
         elif choice == 1:
             _flow_movie(
                 settings, disc_info, mode="main",
                 backup_dir=backup_dir,
+                dispatcher=dispatcher,
             )
         elif choice == 2:
             _flow_movie(
                 settings, disc_info, mode="multi",
                 backup_dir=backup_dir,
+                dispatcher=dispatcher,
             )
         elif choice == 3:
             _flow_tv(
-                settings, disc_info, backup_dir=backup_dir
+                settings, disc_info,
+                backup_dir=backup_dir,
+                dispatcher=dispatcher,
             )
         elif choice == 4:
             _await_tmdb(tmdb_thread)
             _flow_select(
-                settings, disc_info, backup_dir=backup_dir
+                settings, disc_info,
+                backup_dir=backup_dir,
+                dispatcher=dispatcher,
             )
         elif choice == 5:
             _show_disc_info(disc_info)
@@ -627,8 +656,11 @@ def _flow_movie(
     disc_info: DiscInfo,
     mode: str,
     backup_dir: Path,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """Movie rip flow (full, main, or multi)."""
+    from ripper.notifications import EventType, NotificationEvent
+
     name = _prompt_movie_name(disc_info)
     if not name:
         return
@@ -646,26 +678,45 @@ def _flow_movie(
 
     try:
         if mode == "full":
-            rip_movie_full(settings, disc_info, name, backup_dir)
+            rip_movie_full(
+                settings, disc_info, name, backup_dir,
+                dispatcher=dispatcher,
+            )
         elif mode == "main":
             rip_movie_main(settings, disc_info, name, backup_dir)
         elif mode == "multi":
             rip_multi_disc(
-                settings, disc_info, name, disc_count, backup_dir
+                settings, disc_info, name, disc_count, backup_dir,
+                dispatcher=dispatcher,
             )
+        if dispatcher and dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.RIP_COMPLETE,
+                message=f"Rip complete: {name}",
+                disc_name=disc_info.name,
+            ))
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
         console.print(f"\n  [red]Error: {e}[/]")
         logger.error("Rip failed: %s", e, exc_info=True)
+        if dispatcher and dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.RIP_FAILED,
+                message=f"Rip failed: {name}",
+                disc_name=disc_info.name,
+            ))
 
 
 def _flow_tv(
     settings: Settings,
     disc_info: DiscInfo,
     backup_dir: Path,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """TV episode rip flow."""
+    from ripper.notifications import EventType, NotificationEvent
+
     suggested_show = None
     if disc_info.discdb_media_type == MediaType.TV_SHOW:
         suggested_show = disc_info.discdb_title
@@ -679,19 +730,34 @@ def _flow_tv(
 
     try:
         rip_tv(settings, disc_info, show, season, backup_dir)
+        if dispatcher and dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.RIP_COMPLETE,
+                message=f"Rip complete: {show}",
+                disc_name=disc_info.name,
+            ))
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
         console.print(f"\n  [red]Error: {e}[/]")
         logger.error("Rip failed: %s", e, exc_info=True)
+        if dispatcher and dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.RIP_FAILED,
+                message=f"Rip failed: {show}",
+                disc_name=disc_info.name,
+            ))
 
 
 def _flow_select(
     settings: Settings,
     disc_info: DiscInfo,
     backup_dir: Path,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """Selected titles rip flow."""
+    from ripper.notifications import EventType, NotificationEvent
+
     selected_ids = _select_titles(disc_info)
     if not selected_ids:
         return
@@ -707,11 +773,23 @@ def _flow_select(
         rip_selected(
             settings, disc_info, name, selected_ids, backup_dir
         )
+        if dispatcher and dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.RIP_COMPLETE,
+                message=f"Rip complete: {name}",
+                disc_name=disc_info.name,
+            ))
     except RipCancelledError:
         console.print("\n  [yellow]Cancelled by user.[/]")
     except Exception as e:
         console.print(f"\n  [red]Error: {e}[/]")
         logger.error("Rip failed: %s", e, exc_info=True)
+        if dispatcher and dispatcher.enabled:
+            dispatcher.notify(NotificationEvent(
+                event_type=EventType.RIP_FAILED,
+                message=f"Rip failed: {name}",
+                disc_name=disc_info.name,
+            ))
 
 
 # ── Batch Mode ────────────────────────────────────────────────────
@@ -734,7 +812,9 @@ class _PendingDisc:
 
 
 def _finish_pending_disc(
-    settings: Settings, pending: _PendingDisc,
+    settings: Settings,
+    pending: _PendingDisc,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """Complete post-remux work for a disc that was remuxed in background."""
     pending.remux.result_or_raise()
@@ -743,6 +823,7 @@ def _finish_pending_disc(
         classify_and_organize_movie(
             settings, pending.disc_info,
             pending.name, pending.remux.staging,
+            dispatcher=dispatcher,
         )
     elif pending.mode == "main":
         console.print("  Organizing files...")
@@ -839,6 +920,14 @@ def run_batch(
     )
     console.print()
 
+    from ripper.notifications import (
+        EventType,
+        NotificationEvent,
+        create_dispatcher,
+    )
+
+    dispatcher = create_dispatcher(settings)
+
     pending: _PendingDisc | None = None
     disc_num = 0
 
@@ -890,7 +979,9 @@ def run_batch(
                     )
                     pending.remux.join()
                 try:
-                    _finish_pending_disc(settings, pending)
+                    _finish_pending_disc(
+                        settings, pending, dispatcher,
+                    )
                 except Exception as e:
                     console.print(
                         f"  [red]Previous disc error: {e}[/]"
@@ -905,6 +996,13 @@ def run_batch(
 
             # Interactive: show summary, menu, prompts
             _show_disc_summary(disc_info, verbose=verbose)
+
+            if dispatcher.enabled:
+                dispatcher.notify(NotificationEvent(
+                    event_type=EventType.ACTION_NEEDED,
+                    message=f"Disc {disc_num} ready — choose a rip mode",
+                    disc_name=disc_info.name,
+                ))
 
             choice = _show_menu()
             if choice is None:
@@ -987,6 +1085,7 @@ def run_batch(
                     rip_multi_disc(
                         settings, disc_info, name,
                         disc_count, backup_dir,
+                        dispatcher=dispatcher,
                     )
                 except RipCancelledError:
                     console.print(
@@ -999,6 +1098,11 @@ def run_batch(
                     )
                 shutil.rmtree(backup_dir, ignore_errors=True)
 
+                if dispatcher.enabled:
+                    dispatcher.notify(NotificationEvent(
+                        event_type=EventType.INSERT_DISC,
+                        message="Insert next disc",
+                    ))
                 if not _prompt_next_disc():
                     break
                 continue
@@ -1034,6 +1138,12 @@ def run_batch(
             # Eject and prompt for next disc
             eject_disc(settings.device)
 
+            if dispatcher.enabled:
+                dispatcher.notify(NotificationEvent(
+                    event_type=EventType.INSERT_DISC,
+                    message="Insert next disc",
+                    disc_name=name,
+                ))
             if not _prompt_next_disc():
                 # Finish the last disc
                 console.print(
@@ -1041,7 +1151,9 @@ def run_batch(
                 )
                 pending.remux.join()
                 try:
-                    _finish_pending_disc(settings, pending)
+                    _finish_pending_disc(
+                        settings, pending, dispatcher,
+                    )
                 except Exception as e:
                     console.print(
                         f"  [red]Error: {e}[/]"
@@ -1097,7 +1209,9 @@ def run_batch(
                 )
                 pending.remux.join()
             try:
-                _finish_pending_disc(settings, pending)
+                _finish_pending_disc(
+                    settings, pending, dispatcher,
+                )
             except Exception as e:
                 console.print(f"  [red]Cleanup error: {e}[/]")
 

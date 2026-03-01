@@ -17,5 +17,9 @@ auto_eject = true
 min_main_length = 3600    # 1 hour - classify as main feature
 min_extra_length = 30     # Skip titles < 30s (menus)
 
+[notifications]
+notify_terminal = true               # terminal bell on user-input needed
+notify_slack_webhook_url = ""         # Slack incoming webhook URL (optional)
+
 [ui]
 theme = "dark"

@@ -1,11 +1,17 @@
 """Rip flow operations for the interactive TUI."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ripper.notifications import NotificationDispatcher
 
 from rich.console import Console
 
@@ -305,6 +311,7 @@ def classify_and_organize_movie(
     disc_info: DiscInfo,
     name: str,
     staging: Path,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """MKV finding, title matching, extras classification, and organize.
 
@@ -338,6 +345,7 @@ def classify_and_organize_movie(
         if unmatched:
             manual = classify_extras_interactive(
                 unmatched, disc_info=disc_info,
+                dispatcher=dispatcher,
             )
             extras_map.update(manual)
     else:
@@ -346,6 +354,7 @@ def classify_and_organize_movie(
         if extras:
             extras_map = classify_extras_interactive(
                 extras, disc_info=disc_info,
+                dispatcher=dispatcher,
             )
 
     console.print("  Organizing files...")
@@ -362,6 +371,7 @@ def rip_movie_full(
     disc_info: DiscInfo,
     name: str,
     backup_dir: Path,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """Rip movie with all extras."""
     staging = settings.staging_dir / name
@@ -371,7 +381,10 @@ def rip_movie_full(
         backup_dir, staging, name, settings, titles=titles,
     )
 
-    classify_and_organize_movie(settings, disc_info, name, staging)
+    classify_and_organize_movie(
+        settings, disc_info, name, staging,
+        dispatcher=dispatcher,
+    )
 
     if settings.auto_eject:
         eject_disc(settings.device)
@@ -418,6 +431,7 @@ def rip_multi_disc(
     disc_count: int,
     backup_dir: Path,
     merge: bool = True,
+    dispatcher: NotificationDispatcher | None = None,
 ) -> None:
     """Rip multi-disc movie.
 
@@ -440,6 +454,17 @@ def rip_multi_disc(
         else:
             eject_disc(settings.device)
             console.print()
+            if dispatcher and dispatcher.enabled:
+                from ripper.notifications import (
+                    EventType,
+                    NotificationEvent,
+                )
+
+                dispatcher.notify(NotificationEvent(
+                    event_type=EventType.INSERT_DISC,
+                    message=f"Insert disc {d} of {disc_count}",
+                    disc_name=name,
+                ))
             try:
                 input(f"  Insert disc {d} and press Enter...")
             except (EOFError, KeyboardInterrupt):

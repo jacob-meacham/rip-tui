@@ -48,6 +48,10 @@ class Settings(BaseSettings):
         description="Skip titles shorter than this",
     )
 
+    # Notifications
+    notify_terminal: bool = True
+    notify_slack_webhook_url: str = ""
+
     # UI
     theme: str = "dark"
 
@@ -75,6 +79,8 @@ class Settings(BaseSettings):
             "auto_eject",
             "min_main_length",
             "min_extra_length",
+            "notify_terminal",
+            "notify_slack_webhook_url",
             "theme",
         }
         normalized = {
@@ -114,6 +120,12 @@ class Settings(BaseSettings):
             for key in ("min_main_length", "min_extra_length"):
                 if key in ripping:
                     normalized[key] = ripping[key]
+
+        notifications = data.get("notifications")
+        if isinstance(notifications, dict):
+            for key in ("notify_terminal", "notify_slack_webhook_url"):
+                if key in notifications:
+                    normalized[key] = notifications[key]
 
         ui = data.get("ui")
         if isinstance(ui, dict) and "theme" in ui:
