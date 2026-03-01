@@ -105,13 +105,29 @@ def run_interactive(
     if disc_info is None:
         return
 
-    # Kick off TMDb lookup in background — will update disc_info
-    # before the user finishes navigating prompts
-    tmdb_thread = _start_tmdb_lookup(disc_info, settings)
-
     # Create fresh backup if we don't have one yet
     if backup_dir is None:
         backup_dir = create_backup(settings, settings.staging_dir)
+
+        # Re-scan from backup so title IDs match what makemkvcon
+        # will use during remux.  Disc vs backup scans can assign
+        # different indices to the same content.
+        with console.status("  Indexing backup...", spinner="dots"):
+            try:
+                disc_info = scan_disc(settings, backup_dir=backup_dir)
+            except Exception as e:
+                console.print(f"  [red]Backup scan failed: {e}[/]")
+                return
+            classify_titles(
+                disc_info.titles, settings.min_main_length
+            )
+            disc_info.detected_media_type = detect_media_type(
+                disc_info.titles, settings.min_main_length
+            )
+
+    # Kick off TMDb lookup in background — will update disc_info
+    # before the user finishes navigating prompts
+    tmdb_thread = _start_tmdb_lookup(disc_info, settings)
 
     enrich_disc_info(disc_info, backup_dir, settings)
 
