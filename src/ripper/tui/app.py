@@ -23,7 +23,7 @@ from simple_term_menu import TerminalMenu
 from ripper.config.settings import Settings
 from ripper.core.disc import DiscInfo, MediaType
 from ripper.core.organizer import organize_movie, organize_tv
-from ripper.core.ripper import RipCancelledError
+from ripper.core.ripper import ProgressCallback, RipCancelledError, RipProgress
 from ripper.core.scanner import scan_disc
 from ripper.metadata.classifier import (
     classify_titles,
@@ -32,6 +32,7 @@ from ripper.metadata.classifier import (
 from ripper.metadata.matcher import clean_disc_name
 from ripper.tui.display import (
     ConcurrentProgress,
+    print_progress,
     print_title_table,
     title_display_name,
 )
@@ -929,6 +930,15 @@ def run_batch(
     completed_backups: list[Path] = []
     disc_num = 0
 
+    # Mutable relay so background remux progress can be redirected
+    # into ConcurrentProgress when backup runs in parallel.
+    _remux_cb_target: list[ProgressCallback | None] = [None]
+
+    def _remux_progress(progress: RipProgress) -> None:
+        cb = _remux_cb_target[0]
+        if cb is not None:
+            cb(progress)
+
     try:
         while True:
             disc_num += 1
@@ -954,11 +964,13 @@ def run_batch(
                     " remuxing previous...[/]"
                 )
                 with ConcurrentProgress() as cp:
+                    _remux_cb_target[0] = cp.make_callback("remux")
                     backup_dir = create_backup(
                         settings, backup_staging,
                         on_progress=cp.make_callback("backup"),
                         process_id=f"backup-disc{disc_num}",
                     )
+                _remux_cb_target[0] = None
             else:
                 backup_dir = create_backup(settings, backup_staging)
 
@@ -1124,9 +1136,11 @@ def run_batch(
                     if t.id in selected_ids
                 ]
 
+            _remux_cb_target[0] = print_progress
             remux_handle = start_remux_background(
                 backup_dir, staging, name, settings,
                 titles=titles,
+                on_progress=_remux_progress,
                 process_id=f"remux-disc{disc_num}",
             )
 

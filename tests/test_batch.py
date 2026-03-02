@@ -133,3 +133,19 @@ class TestFinishPendingDiscNoAutoDelete:
             "_finish_pending_disc must not auto-delete backups. "
             "Deletion should be deferred to end of batch."
         )
+
+
+class TestRemuxProgressCallback:
+    """Background remux must receive a progress callback."""
+
+    def test_batch_passes_progress_to_remux(self):
+        """run_batch source must pass on_progress to
+        start_remux_background."""
+        import inspect
+        from ripper.tui.app import run_batch
+
+        source = inspect.getsource(run_batch)
+        assert "on_progress=" in source, (
+            "run_batch must pass on_progress to "
+            "start_remux_background for ConcurrentProgress display"
+        )
