@@ -74,6 +74,21 @@ def backup_is_valid(backup_dir: Path) -> bool:
     return any(stream_dir.glob("*.m2ts"))
 
 
+def _apply_discdb_result(disc_info: DiscInfo, result: dict) -> None:
+    """Populate disc_info fields from a DiscDB result dict."""
+    disc_info.discdb_title = result.get("title")
+    year = result.get("year")
+    if year is not None:
+        disc_info.discdb_year = int(year)
+    discdb_type = result.get("type", "")
+    disc_info.discdb_media_type = detect_media_type(
+        disc_info.titles, discdb_type=discdb_type
+    )
+    apply_discdb_classifications(
+        disc_info.titles, result.get("titles", [])
+    )
+
+
 def enrich_disc_info(
     disc_info: DiscInfo,
     backup_dir: Path,
@@ -83,6 +98,7 @@ def enrich_disc_info(
 
     Skips DiscDB API call when discdb_enabled is False,
     but always computes the content hash from the backup.
+    Falls back to URL-based lookup when hash lookup misses.
     """
     content_hash = compute_hash_from_backup(backup_dir)
     if content_hash:
@@ -95,25 +111,40 @@ def enrich_disc_info(
     if not settings.discdb_enabled:
         return
 
-    result = _sync_discdb_lookup(content_hash)
+    with console.status(
+        "  [dim]Querying TheDiscDB...[/]", spinner="dots",
+    ):
+        result = _sync_discdb_lookup(content_hash)
     if result:
-        disc_info.discdb_title = result.get("title")
-        year = result.get("year")
-        if year is not None:
-            disc_info.discdb_year = int(year)
-        discdb_type = result.get("type", "")
-        disc_info.discdb_media_type = detect_media_type(
-            disc_info.titles, discdb_type=discdb_type
+        _apply_discdb_result(disc_info, result)
+        console.print(
+            f"  [green]TheDiscDB[/]: {disc_info.discdb_title}"
+            f" ({disc_info.discdb_year or '?'})"
         )
-        apply_discdb_classifications(
-            disc_info.titles, result.get("titles", [])
-        )
+        return
+
+    console.print("  [dim]TheDiscDB: no hash match[/]")
+
+    # Prompt for manual URL fallback
+    try:
+        url = input("  DiscDB URL (Enter to skip): ").strip()
+    except EOFError:
+        url = ""
+    if not url:
+        return
+
+    with console.status(
+        "  [dim]Querying TheDiscDB by URL...[/]", spinner="dots",
+    ):
+        url_result = _sync_discdb_url_lookup(url)
+    if url_result:
+        _apply_discdb_result(disc_info, url_result)
         console.print(
             f"  [green]TheDiscDB[/]: {disc_info.discdb_title}"
             f" ({disc_info.discdb_year or '?'})"
         )
     else:
-        console.print("  [dim]TheDiscDB: no match[/]")
+        console.print("  [dim]TheDiscDB: no match for URL[/]")
 
 
 def remux_from_backup(
@@ -227,6 +258,24 @@ def _sync_discdb_lookup(content_hash: str) -> dict | None:
         return asyncio.run(_lookup())
     except Exception:
         logger.warning("DiscDB lookup failed", exc_info=True)
+        return None
+
+
+def _sync_discdb_url_lookup(url: str) -> dict | None:
+    """Synchronous DiscDB URL-based lookup."""
+    from ripper.metadata.discdb import DiscDbClient
+
+    async def _lookup() -> dict | None:
+        client = DiscDbClient()
+        try:
+            return await client.lookup_disc_by_url(url)
+        finally:
+            await client.close()
+
+    try:
+        return asyncio.run(_lookup())
+    except Exception:
+        logger.warning("DiscDB URL lookup failed", exc_info=True)
         return None
 
 

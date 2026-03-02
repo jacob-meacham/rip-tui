@@ -10,6 +10,7 @@ from ripper.config.settings import Settings
 from ripper.core.disc import DiscDbTitleInfo, DiscInfo, Title
 from ripper.tui.flows import (
     RemuxHandle,
+    _apply_discdb_result,
     cleanup_backup,
     create_backup,
     enrich_disc_info,
@@ -295,3 +296,125 @@ class TestStartRemuxBackground:
 
         assert handle.error is not None
         assert "remux boom" in str(handle.error)
+
+
+class TestApplyDiscdbResult:
+    def test_sets_fields_and_calls_classifications(self, disc_info):
+        result = {
+            "title": "My Neighbor Totoro",
+            "year": 1988,
+            "type": "Movie",
+            "titles": [
+                {"source_file": "00001.mpls", "item_title": "Main",
+                 "item_type": "MainMovie"},
+            ],
+        }
+
+        with patch(
+            "ripper.tui.flows.apply_discdb_classifications"
+        ) as mock_classify:
+            _apply_discdb_result(disc_info, result)
+
+        assert disc_info.discdb_title == "My Neighbor Totoro"
+        assert disc_info.discdb_year == 1988
+        mock_classify.assert_called_once_with(
+            disc_info.titles, result["titles"]
+        )
+
+    def test_handles_none_year(self, disc_info):
+        result = {"title": "X", "year": None, "type": "Movie", "titles": []}
+        _apply_discdb_result(disc_info, result)
+        assert disc_info.discdb_year is None
+
+
+class TestEnrichDiscInfoUrlFallback:
+    def test_skip_on_enter(self, disc_info, settings):
+        """Pressing Enter skips URL lookup — no API call."""
+        settings.discdb_enabled = True
+        backup_dir = Path("/fake/backup")
+
+        with patch(
+            "ripper.tui.flows.compute_hash_from_backup",
+            return_value="ABC123",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_lookup",
+            return_value=None,
+        ), patch(
+            "builtins.input", return_value="",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_url_lookup",
+        ) as mock_url:
+            enrich_disc_info(disc_info, backup_dir, settings)
+
+        mock_url.assert_not_called()
+
+    def test_url_with_match(self, disc_info, settings):
+        """Valid URL that returns a match applies result."""
+        settings.discdb_enabled = True
+        backup_dir = Path("/fake/backup")
+        url_result = {
+            "title": "Totoro",
+            "year": 1988,
+            "type": "Movie",
+            "titles": [],
+        }
+
+        with patch(
+            "ripper.tui.flows.compute_hash_from_backup",
+            return_value="ABC123",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_lookup",
+            return_value=None,
+        ), patch(
+            "builtins.input",
+            return_value="https://thediscdb.com/movie/totoro/releases/2020/discs/bd",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_url_lookup",
+            return_value=url_result,
+        ):
+            enrich_disc_info(disc_info, backup_dir, settings)
+
+        assert disc_info.discdb_title == "Totoro"
+        assert disc_info.discdb_year == 1988
+
+    def test_url_no_match(self, disc_info, settings):
+        """Valid URL that returns no match leaves disc_info unchanged."""
+        settings.discdb_enabled = True
+        backup_dir = Path("/fake/backup")
+
+        with patch(
+            "ripper.tui.flows.compute_hash_from_backup",
+            return_value="ABC123",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_lookup",
+            return_value=None,
+        ), patch(
+            "builtins.input",
+            return_value="https://thediscdb.com/movie/nope/releases/x/discs/y",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_url_lookup",
+            return_value=None,
+        ):
+            enrich_disc_info(disc_info, backup_dir, settings)
+
+        assert disc_info.discdb_title is None
+
+    def test_eof_skips_url(self, disc_info, settings):
+        """EOFError on input skips URL lookup."""
+        settings.discdb_enabled = True
+        backup_dir = Path("/fake/backup")
+
+        with patch(
+            "ripper.tui.flows.compute_hash_from_backup",
+            return_value="ABC123",
+        ), patch(
+            "ripper.tui.flows._sync_discdb_lookup",
+            return_value=None,
+        ), patch(
+            "builtins.input", side_effect=EOFError,
+        ), patch(
+            "ripper.tui.flows._sync_discdb_url_lookup",
+        ) as mock_url:
+            enrich_disc_info(disc_info, backup_dir, settings)
+
+        mock_url.assert_not_called()
