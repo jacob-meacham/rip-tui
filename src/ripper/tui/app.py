@@ -964,6 +964,16 @@ def run_batch(
             else:
                 backup_dir = create_backup(settings, backup_staging)
 
+            # Re-scan from backup so title IDs match what makemkvcon
+            # will use during remux.  Disc vs backup scans can assign
+            # different indices to the same content.
+            disc_info = _scan_disc(settings, backup_dir=backup_dir)
+            if disc_info is None:
+                console.print(
+                    "  [red]Backup scan failed, skipping disc[/]"
+                )
+                continue
+
             enrich_disc_info(disc_info, backup_dir, settings)
 
             # Wait for any pending remux before interactive prompts

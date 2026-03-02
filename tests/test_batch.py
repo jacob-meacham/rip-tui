@@ -101,3 +101,19 @@ class TestCreateBackupBatch:
 
         assert staging.exists()
         assert result == staging / ".backup"
+
+
+class TestBatchRescan:
+    """Batch mode must re-scan from backup after creating it."""
+
+    def test_rescan_exists_in_run_batch(self):
+        """After backup, _scan_disc must be called with backup_dir=
+        so title IDs match the backup."""
+        import inspect
+        from ripper.tui.app import run_batch
+
+        source = inspect.getsource(run_batch)
+        assert "_scan_disc(settings, backup_dir=backup_dir)" in source, (
+            "run_batch must re-scan from backup after backup step "
+            "so title IDs match (see interactive mode lines 130-141)"
+        )
