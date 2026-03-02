@@ -51,8 +51,20 @@ console = Console()
 # ── Backup Pipeline ────────────────────────────────────────────────
 
 
-def create_backup(settings: Settings, staging_dir: Path) -> Path:
-    """Backup disc to staging_dir/.backup, returns backup dir path."""
+def create_backup(
+    settings: Settings,
+    staging_dir: Path,
+    on_progress: ProgressCallback | None = None,
+    process_id: str | None = None,
+) -> Path:
+    """Backup disc to staging_dir/.backup, returns backup dir path.
+
+    Args:
+        settings: Application settings (device, paths, etc.).
+        staging_dir: Parent directory; backup is created at .backup/ inside it.
+        on_progress: Optional progress callback (defaults to print_progress).
+        process_id: Optional process identifier for concurrent tracking.
+    """
     backup_dir = staging_dir / ".backup"
 
     # Clean up any partial/corrupt leftover backup
@@ -61,12 +73,15 @@ def create_backup(settings: Settings, staging_dir: Path) -> Path:
 
     staging_dir.mkdir(parents=True, exist_ok=True)
 
+    progress_cb = on_progress if on_progress is not None else print_progress
+
     start_rip_with_status(
         "Backing up disc...",
         backup_disc,
         backup_dir,
         settings,
-        on_progress=print_progress,
+        on_progress=progress_cb,
+        process_id=process_id,
     )
 
     return backup_dir

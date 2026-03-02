@@ -956,15 +956,11 @@ def run_batch(
                     " remuxing previous...[/]"
                 )
                 with ConcurrentProgress() as cp:
-                    from ripper.core.ripper import backup_disc as _backup
-
-                    backup_progress = cp.make_callback("backup")
-                    _backup(
-                        backup_staging, settings,
-                        on_progress=backup_progress,
+                    backup_dir = create_backup(
+                        settings, backup_staging,
+                        on_progress=cp.make_callback("backup"),
                         process_id=f"backup-disc{disc_num}",
                     )
-                backup_dir = backup_staging
             else:
                 backup_dir = create_backup(settings, backup_staging)
 
