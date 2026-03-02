@@ -851,9 +851,6 @@ def _finish_pending_disc(
         f"  [green bold]Done![/] {pending.name}"
     )
 
-    # Clean up the per-disc backup
-    shutil.rmtree(pending.backup_dir, ignore_errors=True)
-
 
 _INTERRUPT_ITEMS = [
     "Cancel current disc",
@@ -929,6 +926,7 @@ def run_batch(
     dispatcher = create_dispatcher(settings)
 
     pending: _PendingDisc | None = None
+    completed_backups: list[Path] = []
     disc_num = 0
 
     try:
@@ -995,6 +993,8 @@ def run_batch(
                     logger.error(
                         "Post-remux failed: %s", e, exc_info=True,
                     )
+                else:
+                    completed_backups.append(pending.backup_dir)
                 pending = None
 
             # Kick off TMDb in background
@@ -1102,7 +1102,7 @@ def run_batch(
                     logger.error(
                         "Rip failed: %s", e, exc_info=True,
                     )
-                shutil.rmtree(backup_dir, ignore_errors=True)
+                completed_backups.append(backup_dir)
 
                 if dispatcher.enabled:
                     dispatcher.notify(NotificationEvent(
@@ -1168,6 +1168,8 @@ def run_batch(
                         "Post-remux failed: %s", e,
                         exc_info=True,
                     )
+                else:
+                    completed_backups.append(pending.backup_dir)
                 pending = None
                 break
 
@@ -1220,6 +1222,32 @@ def run_batch(
                 )
             except Exception as e:
                 console.print(f"  [red]Cleanup error: {e}[/]")
+            else:
+                completed_backups.append(pending.backup_dir)
+
+    # Prompt to clean up backups
+    valid_backups = [b for b in completed_backups if b.exists()]
+    if valid_backups:
+        console.print()
+        console.print(
+            f"  {len(valid_backups)} backup(s) remaining:"
+        )
+        for b in valid_backups:
+            console.print(f"    {b}")
+        console.print()
+        try:
+            answer = input(
+                "  Delete all backups? [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            answer = ""
+        if answer in ("y", "yes"):
+            for b in valid_backups:
+                shutil.rmtree(b, ignore_errors=True)
+            console.print("  [dim]Backups removed.[/]")
+        else:
+            console.print("  [dim]Backups kept.[/]")
 
     console.print()
     console.print("  [bold]Batch complete.[/]")

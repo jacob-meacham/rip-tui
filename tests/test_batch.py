@@ -117,3 +117,19 @@ class TestBatchRescan:
             "run_batch must re-scan from backup after backup step "
             "so title IDs match (see interactive mode lines 130-141)"
         )
+
+
+class TestFinishPendingDiscNoAutoDelete:
+    """_finish_pending_disc must NOT auto-delete backup."""
+
+    def test_backup_not_deleted_after_finish(self):
+        """Verify _finish_pending_disc source doesn't contain
+        shutil.rmtree of backup_dir."""
+        import inspect
+        from ripper.tui.app import _finish_pending_disc
+
+        source = inspect.getsource(_finish_pending_disc)
+        assert "shutil.rmtree" not in source, (
+            "_finish_pending_disc must not auto-delete backups. "
+            "Deletion should be deferred to end of batch."
+        )
