@@ -110,6 +110,7 @@ class TestBatchRescan:
         """After backup, _scan_disc must be called with backup_dir=
         so title IDs match the backup."""
         import inspect
+
         from ripper.tui.app import run_batch
 
         source = inspect.getsource(run_batch)
@@ -126,6 +127,7 @@ class TestFinishPendingDiscNoAutoDelete:
         """Verify _finish_pending_disc source doesn't contain
         shutil.rmtree of backup_dir."""
         import inspect
+
         from ripper.tui.app import _finish_pending_disc
 
         source = inspect.getsource(_finish_pending_disc)
@@ -142,6 +144,7 @@ class TestRemuxProgressCallback:
         """run_batch source must pass on_progress to
         start_remux_background."""
         import inspect
+
         from ripper.tui.app import run_batch
 
         source = inspect.getsource(run_batch)
